@@ -32,8 +32,11 @@ Godot 4.6 / RenderingDevice Compute。核心求解全部在 GPU 上完成；CPU 
 | 14 / 15 | pressure_a / pressure_b | `float[nx*ny]` | Jacobi ping-pong |
 | 16 | divergence | `float[nx*ny]` | 压力方程 RHS |
 | 17 | display | `uint[nx*ny]` | 打包 RGBA8，回读上屏 |
-| 18 | probe | `float[8]` | 鼠标 cell 的 [type,u,v,p,density,fluid] |
+| 18 | probe | `float[8]` | 鼠标 cell 的 [type,u,v,p,density,fluid,rho] |
 | 19 | brush_mask | `int[nx*ny]` | 提交时标记被绘制的 cell |
+| 20 | phase | `int[capacity]` | 每粒子相 id：0 水 / 1 柠檬汁 / 2 蜂蜜 |
+| 21 | phase_count | `int[nx*ny*3]` | 每 cell 各相粒子数（定色 + 算密度） |
+| 22 | rho_cell | `float[nx*ny]` | 每 cell 平均密度（变密度压力解用） |
 
 **MAC 交错网格（Harlow–Welch）**：cell `(i,j)` 中心在 `(i+0.5, j+0.5)`；U 面（速度 X）位于
 `(i, j+0.5)`，索引 `i + j*(nx+1)`；V 面（速度 Y）位于 `(i+0.5, j)`，索引 `i + j*nx`。
@@ -106,14 +109,37 @@ p_new = ( Σ p_neighbour  −  divergence / phys_dt ) / count
 `count==0`（被固体包围）时取 `p_atm`。非流体 cell 每次迭代写入 `p_atm`（空）或 `0`（固体），
 保持 ghost 一致，供投影读取。60 次迭代（偶数）后结果稳定落在 `pressure_a`。
 
-**投影（`project.glsl`）**：对每个内部面 `u -= dt·(p_R − p_L)`，其中固体侧面速度直接置 0，
+**投影（`project.glsl`）**：对每个内部面 `u -= dt·(p_R − p_L)/ρ_face`，其中固体侧面速度直接置 0，
 空 cell 侧用 `p_atm`。之后再跑一次 `enforce_solids`。
+
+## 6.5 多相液体：变密度投影（水 / 柠檬汁 / 蜂蜜）
+
+三种液体只在**密度**上不同（`RHO = {水 1.0, 柠檬汁 1.4, 蜂蜜 2.0}`，见 `cell_setup.glsl`/`render.glsl`
+顶部常量）。密度只进入**压力投影**，浮力/分层由此自然涌现——重力对所有面均匀加速度（`v += g·dt`，
+与质量无关，物理正确），压力解在密度不均处产生修正速度场，使重的下沉、轻的上浮。
+
+- **粒子相标签**：每粒子一个 `phase`（binding 20），发射时由画笔材质写入（`emit.glsl`：水 2→0、
+  柠檬 4→1、蜂蜜 5→2）。相随粒子平流，不参与速度插值，故 G2P/平流无需改动。
+- **每 cell 密度**：P2G 顺带按相累加计数 `phase_count[3·cell+phase]`（binding 21）；`cell_setup`
+  取计数加权平均得 `rho_cell = Σ(n_p·ρ_p)/Σn_p`（binding 22）。
+- **变密度泊松（`jacobi.glsl`）**：解 `div((1/ρ)∇p) = div(u*)/dt`。每个邻居权重从常密度的 `1`
+  改为 `1/ρ_face`（`ρ_face = 相邻两 fluid cell 密度均值；液/空面用液体自身密度`）：
+  `p_c = (Σ w_n·p_n − div_c/dt) / Σ w_n`，`w_n = 1/ρ_face`。所有密度相等时退化为原常密度模板。
+- **变密度投影（`project.glsl`）**：面梯度除以 `ρ_face`，即 `u -= dt·Δp/ρ_face`。
+- **上色（一格一色）**：`render.glsl` 取该 cell 的**主相**（三计数 argmax）编码进 A 通道
+  （190/210/230 = 水/柠檬/蜂蜜），显示着色器直接取对应 tint。用主相而非平均密度，混合区读作
+  离散的两色而非“浑浊的中间色”，settle 后即是干净的分层色带。
+
+> 局限（第一版）：无表面张力、无粘性、P2G 未按质量加权，故低粘的界面会有数值扩散/搅混
+> （能量大时更明显）。稳定分层能长期保持，主相上色让分层清晰可读。若要更锐利界面可后续加
+> 质量加权 P2G 或表面张力。多相扩展到 N 种只需扩 `RHO`/相计数维度，求解器不变。
 
 ## 7. 渲染：数据纹理 + 着色器合成、回读与 HUD
 
 `render.glsl` 每 cell 输出的**不是最终颜色而是数据**（打包 RGBA8）：
-`R=`含水覆盖(fluid_mask→0/255)、`G/B=`编码的 cell 中心速度（供折射方向）、
-`A=`底材类型码（气 0 / 固体 85 / 真空 170）。CPU 回读该 19 200-uint 缓冲上传到 `_fluid_tex`。
+`R=`含水充盈度(粒子密度→泡沫)、`G/B=`编码的 cell 中心速度（供折射方向）、
+`A=`类型/液体码（气 0 / 固体 85 / 真空 170 / **液体 190+20·主相** = 水190/柠檬210/蜂蜜230）。
+CPU 回读该 19 200-uint 缓冲上传到 `_fluid_tex`。
 
 显示由 **`shaders/water_display.gdshader`**（canvas_item）合成，挂在一个带 `ShaderMaterial` 的
 **Sprite2D**（`scale=10`）上：
@@ -132,7 +158,9 @@ p_new = ( Σ p_neighbour  −  divergence / phys_dt ) / count
 
 **材质语义补充**：
 - **默认背景 = 气**（`cell_type` 初始全填 `AIR`），液面自由边界仍用 `p_atm` ghost。
-- **真空 = 排水口**：`drain.glsl` 每子步把落在 VACUUM cell 的水粒子回收（active 数下降），实现“液体
+- **三种液体（水/柠檬汁/蜂蜜）= 粒子 + 相标签**，不是 `cell_type`（cell_type 只存真空/固体/气）。
+  按键 `3/5/6` 选水/柠檬/蜂蜜画笔，均走 `emit` 发射，密度不同→自动分层（见 §6.5）。
+- **真空 = 排水口**：`drain.glsl` 每子步把落在 VACUUM cell 的液体粒子回收（active 数下降），实现“液体
   接触真空即消失”。
 
 ## 8. 画笔预览与提交（两阶段交互）
@@ -150,6 +178,8 @@ p_new = ( Σ p_neighbour  −  divergence / phys_dt ) / count
   `gravity`(40)。后三者每帧同步到求解器，可运行时实时调。
 - Rendering：`background`(Texture2D，空则用灰)、`background_color`(0.5 灰=气)、`water_color`、
   `water_opacity`(0.55)、`refraction`(0.03)。
+- Liquids 多相：`lemon_color`(泛绿)、`honey_color`(泛黄)——三液体的显示色。**密度**（决定分层顺序）
+  是 `cell_setup.glsl`/`render.glsl` 顶部的 `RHO` 常量（水1.0/柠檬1.4/蜂蜜2.0），非检视器项。
 
 **其余在 `FlipFluidGPU` 顶部 / `main.gd` 常量**：`phys_dt`(1/240)、`p_atm`(3.0)、`fixed_scale`(4096)、
 `emit_ppc`(16)、`SUBSTEPS`(4)。运行时 HUD 全量显示。

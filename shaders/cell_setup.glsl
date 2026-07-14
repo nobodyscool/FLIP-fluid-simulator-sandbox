@@ -24,6 +24,11 @@ layout(set = 0, binding = 11, std430) restrict buffer Mass  { int mass[]; };
 layout(set = 0, binding = 12, std430) restrict buffer CType { int cell_type[]; };
 layout(set = 0, binding = 13, std430) restrict buffer Fluid { int fluid_mask[]; };
 layout(set = 0, binding = 16, std430) restrict buffer Div   { float divergence[]; };
+layout(set = 0, binding = 21, std430) restrict buffer PhaseCnt { int phase_count[]; };
+layout(set = 0, binding = 22, std430) restrict buffer RhoCell  { float rho_cell[]; };
+
+// Per-phase rest density (must match render.glsl): 0=water 1=lemon-juice 2=honey.
+const float RHO[3] = float[](1.0, 1.4, 2.0);
 
 void main() {
 	int c = int(gl_GlobalInvocationID.x);
@@ -33,6 +38,16 @@ void main() {
 
 	bool fluid = (cell_type[c] != SOLID) && (mass[c] > 0);
 	fluid_mask[c] = fluid ? 1 : 0;
+
+	// Per-cell density = count-weighted average of the phase densities. Non-fluid
+	// cells get 0. Drives the variable-density pressure solve (buoyancy/layering).
+	int c0 = phase_count[3 * c + 0];
+	int c1 = phase_count[3 * c + 1];
+	int c2 = phase_count[3 * c + 2];
+	int n = c0 + c1 + c2;
+	rho_cell[c] = (fluid && n > 0)
+		? (RHO[0] * float(c0) + RHO[1] * float(c1) + RHO[2] * float(c2)) / float(n)
+		: 0.0;
 
 	if (fluid) {
 		float uL = grid_u[i + j * (pc.nx + 1)];

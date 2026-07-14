@@ -21,10 +21,16 @@ layout(set = 0, binding = 9,  std430) restrict buffer WtU   { int wt_u[]; };
 layout(set = 0, binding = 10, std430) restrict buffer WtV   { int wt_v[]; };
 layout(set = 0, binding = 11, std430) restrict buffer Mass  { int mass[]; };
 layout(set = 0, binding = 13, std430) restrict buffer Fluid { int fluid_mask[]; };
+layout(set = 0, binding = 21, std430) restrict buffer PhaseCnt { int phase_count[]; };
 
 void main() {
 	uint gid = gl_GlobalInvocationID.x;
 	if (int(gid) < pc.u_count) { mom_u[gid] = 0; wt_u[gid] = 0; }
 	if (int(gid) < pc.v_count) { mom_v[gid] = 0; wt_v[gid] = 0; }
-	if (int(gid) < pc.cell_count) { mass[gid] = 0; fluid_mask[gid] = 0; }
+	if (int(gid) < pc.cell_count) {
+		mass[gid] = 0; fluid_mask[gid] = 0;
+		phase_count[3 * gid + 0] = 0;
+		phase_count[3 * gid + 1] = 0;
+		phase_count[3 * gid + 2] = 0;
+	}
 }

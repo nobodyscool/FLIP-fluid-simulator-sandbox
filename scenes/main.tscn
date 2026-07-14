@@ -6,6 +6,7 @@
 [node name="Main" type="Node2D" unique_id=1527691939]
 visible = false
 script = ExtResource("1_main")
+flip_ratio = 0.93
 background = ExtResource("2_0wfyh")
 water_color = Color(0.09149521, 0.36853132, 0.7644422, 1)
 water_opacity = 0.8

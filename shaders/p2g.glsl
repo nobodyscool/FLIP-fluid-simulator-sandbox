@@ -23,6 +23,8 @@ layout(set = 0, binding = 8,  std430) restrict buffer MomV { int mom_v[]; };
 layout(set = 0, binding = 9,  std430) restrict buffer WtU  { int wt_u[]; };
 layout(set = 0, binding = 10, std430) restrict buffer WtV  { int wt_v[]; };
 layout(set = 0, binding = 11, std430) restrict buffer Mass { int mass[]; };
+layout(set = 0, binding = 20, std430) restrict buffer Phase    { int phase[]; };        // per-particle liquid id
+layout(set = 0, binding = 21, std430) restrict buffer PhaseCnt { int phase_count[]; };  // 3 counts per cell
 
 int fixp(float v) { return int(round(v * pc.fixed_scale)); }
 
@@ -80,8 +82,10 @@ void main() {
 		}
 	}
 
-	// --- deposit unit mass at the containing cell ---
+	// --- deposit unit mass + per-phase count at the containing cell ---
 	int ci = clamp(int(floor(pos.x)), 0, pc.nx - 1);
 	int cj = clamp(int(floor(pos.y)), 0, pc.ny - 1);
-	atomicAdd(mass[ci + cj * pc.nx], fixp(1.0));
+	int cell = ci + cj * pc.nx;
+	atomicAdd(mass[cell], fixp(1.0));
+	atomicAdd(phase_count[3 * cell + clamp(phase[gid], 0, 2)], 1);
 }

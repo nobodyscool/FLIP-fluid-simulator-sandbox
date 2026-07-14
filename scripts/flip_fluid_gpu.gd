@@ -6,11 +6,15 @@ extends RefCounted
 # only the 160x120 display buffer and a 1-cell probe are read back per frame.
 # See docs/DESIGN.md for the data layout and algorithm.
 
-# --- cell type enum (matches the GLSL constants) ---
+# --- material codes ---
+# 0..3 double as stored cell_type values; 2/4/5 are liquid "brush" materials
+# (liquids are represented by particles + a per-particle phase, not a cell type).
 const T_VACUUM := 0
 const T_SOLID  := 1
-const T_WATER  := 2
+const T_WATER  := 2   # phase 0 (rho 1.0)
 const T_AIR    := 3
+const T_LEMON  := 4   # phase 1 (rho 1.4, denser than water)
+const T_HONEY  := 5   # phase 2 (rho 2.0, densest)
 
 # --- grid dimensions ---
 var nx: int
@@ -39,22 +43,22 @@ var _pipeline := {}
 var _uset := {}
 
 var _shader_bindings := {
-	"init_pool":       [0, 1],
-	"clear_grid":      [7, 8, 9, 10, 11, 13],
-	"p2g":             [0, 7, 8, 9, 10, 11],
+	"init_pool":       [0, 1, 20],
+	"clear_grid":      [7, 8, 9, 10, 11, 13, 21],
+	"p2g":             [0, 7, 8, 9, 10, 11, 20, 21],
 	"normalize":       [3, 4, 5, 6, 7, 8, 9, 10],
 	"enforce_solids":  [3, 4, 12],
-	"cell_setup":      [3, 4, 11, 12, 13, 16],
-	"jacobi":          [12, 13, 14, 15, 16],
-	"project":         [3, 4, 12, 13, 14],
+	"cell_setup":      [3, 4, 11, 12, 13, 16, 21, 22],
+	"jacobi":          [12, 13, 14, 15, 16, 22],
+	"project":         [3, 4, 12, 13, 14, 22],
 	"g2p_advect":      [0, 3, 4, 5, 6, 12],
 	"drain":           [0, 1, 2, 12],
-	"emit":            [0, 1, 2, 12, 19],
+	"emit":            [0, 1, 2, 12, 19, 20],
 	"free_particles":  [0, 1, 2, 19],
 	"brush_apply":     [12, 19],
 	"pressure_impulse":[0, 19],
 	"clear_vel":       [0],
-	"render":          [3, 4, 11, 12, 13, 14, 17, 18],
+	"render":          [3, 4, 11, 12, 13, 14, 17, 18, 21],
 }
 
 # transient push-constant fields updated per dispatch
@@ -112,6 +116,9 @@ func _create_buffers() -> void:
 	_buf[17] = _new_buf(cell_count * 4)         # display (packed RGBA8)
 	_buf[18] = _new_buf(8 * 4)                  # probe
 	_buf[19] = _new_buf(cell_count * 4)         # brush_mask
+	_buf[20] = _new_buf(capacity * 4)           # phase (per-particle liquid id)
+	_buf[21] = _new_buf(cell_count * 3 * 4)     # phase_count (3 per-cell counts)
+	_buf[22] = _new_buf(cell_count * 4)         # rho_cell (per-cell density, float)
 
 
 func _new_buf(size_bytes: int) -> RID:
@@ -258,7 +265,8 @@ func commit_brush(mask: PackedByteArray, material: int, mode: int, value: float,
 	if mode == 1:
 		# pressure brush -> velocity impulse on the affected particles
 		_dispatch(cl, "pressure_impulse", pgroups)
-	elif material == T_WATER:
+	elif material == T_WATER or material == T_LEMON or material == T_HONEY:
+		# any liquid: emit particles carrying the material's phase (set in emit.glsl)
 		_dispatch(cl, "emit", cgroups)
 	else:
 		# vacuum / solid / air: recycle covered particles, then stamp the type

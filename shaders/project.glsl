@@ -24,6 +24,7 @@ layout(set = 0, binding = 4,  std430) restrict buffer GridV { float grid_v[]; };
 layout(set = 0, binding = 12, std430) restrict buffer CType { int cell_type[]; };
 layout(set = 0, binding = 13, std430) restrict buffer Fluid { int fluid_mask[]; };
 layout(set = 0, binding = 14, std430) restrict buffer PA    { float p_a[]; };
+layout(set = 0, binding = 22, std430) restrict buffer RhoCell { float rho_cell[]; };
 
 bool solid(int i, int j) {
 	if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny) return true;
@@ -32,6 +33,17 @@ bool solid(int i, int j) {
 float pressure_of(int i, int j) {
 	int c = i + j * pc.nx;
 	return (fluid_mask[c] == 1) ? p_a[c] : pc.p_atm; // ghost = p_atm in empty cells
+}
+// Face density = mean of the adjacent fluid cell densities (variable-density
+// projection). At a liquid/empty face use the liquid's own density. The caller
+// guarantees at least one side is fluid.
+float rho_face(int ia, int ja, int ib, int jb) {
+	int ca = ia + ja * pc.nx;
+	int cb = ib + jb * pc.nx;
+	bool fa = fluid_mask[ca] == 1;
+	bool fb = fluid_mask[cb] == 1;
+	if (fa && fb) return 0.5 * (rho_cell[ca] + rho_cell[cb]);
+	return fa ? rho_cell[ca] : rho_cell[cb];
 }
 
 void main() {
@@ -48,7 +60,7 @@ void main() {
 			if (lf || rf) {
 				float pL = pressure_of(i - 1, j);
 				float pR = pressure_of(i, j);
-				grid_u[g] -= pc.phys_dt * (pR - pL);
+				grid_u[g] -= pc.phys_dt * (pR - pL) / rho_face(i - 1, j, i, j);
 			}
 		}
 	}
@@ -63,7 +75,7 @@ void main() {
 			if (bf || tf) {
 				float pB = pressure_of(i, j - 1);
 				float pT = pressure_of(i, j);
-				grid_v[g] -= pc.phys_dt * (pT - pB);
+				grid_v[g] -= pc.phys_dt * (pT - pB) / rho_face(i, j - 1, i, j);
 			}
 		}
 	}

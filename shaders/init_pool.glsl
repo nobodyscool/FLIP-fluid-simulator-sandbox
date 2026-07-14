@@ -18,10 +18,12 @@ layout(push_constant, std430) uniform Params {
 
 layout(set = 0, binding = 0, std430) restrict buffer Particles { vec4 particles[]; };
 layout(set = 0, binding = 1, std430) restrict buffer FreeList  { int free_list[]; };
+layout(set = 0, binding = 20, std430) restrict buffer Phase    { int phase[]; };
 
 void main() {
 	uint gid = gl_GlobalInvocationID.x;
 	if (int(gid) >= pc.capacity) return;
 	particles[gid] = vec4(-1.0, -1.0, 0.0, 0.0);
 	free_list[gid] = int(gid);
+	phase[gid] = 0;
 }

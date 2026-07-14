@@ -13,19 +13,21 @@ const SUBSTEPS := 4
 
 
 
-# material / mode
-const MAT_NAMES := ["Vacuum 真空", "Solid 固体", "Water 水", "Air 气"]
+# material / mode (indexed by brush material code; 4=lemon, 5=honey are liquids)
+const MAT_NAMES := ["Vacuum 真空", "Solid 固体", "Water 水", "Air 气", "Lemon 柠檬汁", "Honey 蜂蜜"]
 const MAT_PREVIEW := [
 	Color(0, 0, 0, 0.55),          # vacuum
 	Color(0.25, 0.25, 0.25, 0.7),  # solid
 	Color(0.15, 0.42, 0.9, 0.7),   # water
 	Color(0.5, 0.5, 0.5, 0.7),     # air
+	Color(0.55, 0.85, 0.30, 0.7),  # lemon juice (greenish)
+	Color(0.95, 0.78, 0.18, 0.7),  # honey (golden yellow)
 ]
 const PRESSURE_PREVIEW := Color(0.95, 0.75, 0.1, 0.6)
 
 # ---- inspector-tunable parameters (defaults match the in-code values) ----
 @export_group("Simulation")
-@export var particle_capacity: int = 1048576   # pool size; applied at startup only
+@export var particle_capacity: int = 524288   # pool size; applied at startup only 524288
 @export_range(0.0, 1.0, 0.01) var flip_ratio: float = 0.90
 @export var jacobi_iters: int = 60
 @export var gravity: float = 40.0
@@ -38,6 +40,12 @@ const PRESSURE_PREVIEW := Color(0.95, 0.75, 0.1, 0.6)
 @export_range(0.0, 0.2, 0.005) var refraction: float = 0.03
 # 水面渲染：false=每个 cell 一种颜色（清晰像素块，默认）；true=cell 间平滑过渡。
 @export var smooth_water: bool = false
+
+@export_group("Liquids 多相液体")
+# 三种液体的颜色（按密度从轻到重）：水=蓝，柠檬汁=绿，蜂蜜=黄。每格按该格“占多数”的相取色（一格一色）。
+# 密度大小固定在 shaders/cell_setup.glsl、render.glsl 的 RHO 常量（水1.0/柠檬1.4/蜂蜜2.0），决定分层顺序。
+@export var lemon_color: Color = Color(0.55, 0.85, 0.30)   # 柠檬汁：泛绿，密度>水
+@export var honey_color: Color = Color(0.95, 0.78, 0.18)   # 蜂蜜：泛黄，密度>柠檬汁>水
 
 @export_group("Foam 泡沫泛白")
 # 总开关：泡沫（水色蓝→白）。关掉则水面纯蓝，无泛白。
@@ -155,6 +163,8 @@ func _apply_render_params() -> void:
 		_mat.set_shader_parameter("bg_tex", background)
 	_mat.set_shader_parameter("bg_color", background_color)
 	_mat.set_shader_parameter("water_tint", water_color)
+	_mat.set_shader_parameter("lemon_color", lemon_color)
+	_mat.set_shader_parameter("honey_color", honey_color)
 	_mat.set_shader_parameter("water_opacity", water_opacity)
 	_mat.set_shader_parameter("refraction", refraction)
 	_mat.set_shader_parameter("smooth_water", smooth_water)
@@ -166,9 +176,13 @@ func _apply_render_params() -> void:
 	_mat.set_shader_parameter("foam_depth", foam_depth)
 
 
-const TEST_SCENE := false   # true = pre-built solid container + water + air showcase
+const TEST_SCENE := false        # true = pre-built solid container + water + air showcase
+const TEST_MULTIPHASE := true    # true = honey/lemon sinking through water (density layering)
 
 func _seed_initial_water() -> void:
+	if TEST_MULTIPHASE:
+		_setup_multiphase_demo()
+		return
 	if TEST_SCENE:
 		_setup_test_scene()
 		return
@@ -179,6 +193,19 @@ func _seed_initial_water() -> void:
 		for x in range(8, 64):
 			mask.encode_s32((x + y * GRID_W) * 4, 1)
 	solver.commit_brush(mask, FlipFluidGPU.T_WATER, 0, 0.0, Vector2.ZERO, randi())
+
+
+func _setup_multiphase_demo() -> void:
+	# Solid container to hold the liquids.
+	_paint_rect(FlipFluidGPU.T_SOLID, 0, 30, 20, 34, 106)     # left wall
+	_paint_rect(FlipFluidGPU.T_SOLID, 0, 126, 20, 130, 106)   # right wall
+	_paint_rect(FlipFluidGPU.T_SOLID, 0, 30, 102, 130, 106)   # floor
+	# Stable stratification: water (light) on top, lemon juice in the middle,
+	# honey (heavy) on the bottom. Correct density ordering should hold as three
+	# clean colour bands. Paint 5/6 to drop denser liquid in and watch it sink.
+	_paint_rect(FlipFluidGPU.T_WATER, 0, 34, 24, 126, 50)     # top    -> blue
+	_paint_rect(FlipFluidGPU.T_LEMON, 0, 34, 50, 126, 76)     # middle -> green
+	_paint_rect(FlipFluidGPU.T_HONEY, 0, 34, 76, 126, 102)    # bottom -> yellow
 
 
 func _paint_rect(mat: int, mode: int, x0: int, y0: int, x1: int, y1: int) -> void:
@@ -299,6 +326,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_2: _pressure_mode = false; _brush_material = FlipFluidGPU.T_SOLID
 			KEY_3: _pressure_mode = false; _brush_material = FlipFluidGPU.T_WATER
 			KEY_4: _pressure_mode = false; _brush_material = FlipFluidGPU.T_AIR
+			KEY_5: _pressure_mode = false; _brush_material = FlipFluidGPU.T_LEMON
+			KEY_6: _pressure_mode = false; _brush_material = FlipFluidGPU.T_HONEY
 			KEY_0: _pressure_mode = true
 			KEY_P: solver.clear_velocity()
 			KEY_V: solver.clear_pressure()
@@ -350,7 +379,8 @@ func _update_hud() -> void:
 	var mat_txt: String = "Pressure 压力" if _pressure_mode else MAT_NAMES[_brush_material]
 	var cell_type: int = int(probe[0]) if probe.size() > 0 else 0
 	var is_water := probe.size() > 5 and probe[5] > 0.5
-	var cell_txt: String = "Water 水" if is_water else MAT_NAMES[clampi(cell_type, 0, 3)]
+	var rho: float = probe[6] if probe.size() > 6 else 0.0
+	var cell_txt: String = _liquid_name(rho) if is_water else MAT_NAMES[clampi(cell_type, 0, 3)]
 
 	var lines := [
 		"fps: %d    frame dt: %.2f ms    sim step: %.2f ms" % [fps, _frame_dt * 1000.0, _last_step_us / 1000.0],
@@ -362,11 +392,20 @@ func _update_hud() -> void:
 			solver.p_atm, solver.jacobi_iters, solver.gravity, solver.flip_ratio],
 		"",
 		"mouse cell (%d, %d):" % [_mouse_cell.x, _mouse_cell.y],
-		"  type: %s" % cell_txt,
+		"  type: %s%s" % [cell_txt, ("  (rho %.2f)" % rho) if is_water else ""],
 		"  vel: (%.3f, %.3f)" % [probe[1] if probe.size() > 1 else 0.0, probe[2] if probe.size() > 2 else 0.0],
-		"  pressure: %.3f    density: %.2f" % [probe[3] if probe.size() > 3 else 0.0, probe[4] if probe.size() > 4 else 0.0],
+		"  pressure: %.3f    particles: %.1f" % [probe[3] if probe.size() > 3 else 0.0, probe[4] if probe.size() > 4 else 0.0],
 		"",
-		"[1]vac [2]solid [3]water [4]air [0]pressure  |  wheel=radius",
+		"[1]vac [2]solid [3]water [4]air [5]lemon [6]honey [0]pressure  |  wheel=radius",
 		"[space]pause  [P]clear vel  [V]clear pressure  |  L-drag=paint",
 	]
 	_hud.text = "\n".join(lines)
+
+
+# Name a liquid cell by its density (matches the RHO constants in p2g.glsl).
+func _liquid_name(rho: float) -> String:
+	if rho >= 1.7:
+		return "Honey 蜂蜜"
+	elif rho >= 1.2:
+		return "Lemon 柠檬汁"
+	return "Water 水"
