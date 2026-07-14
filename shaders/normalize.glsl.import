@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://y1wp8i5ir0db"
+path="res://.godot/imported/normalize.glsl-791184128e9ebbd9b53de2513c673d92.res"
+
+[deps]
+
+source_file="res://shaders/normalize.glsl"
+dest_files=["res://.godot/imported/normalize.glsl-791184128e9ebbd9b53de2513c673d92.res"]
+
+[params]
+

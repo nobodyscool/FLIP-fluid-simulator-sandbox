@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://8xeui8wymfbu"
+path="res://.godot/imported/clear_vel.glsl-fa0e20ef1d849dacde1c6dbdb7df12e3.res"
+
+[deps]
+
+source_file="res://shaders/clear_vel.glsl"
+dest_files=["res://.godot/imported/clear_vel.glsl-fa0e20ef1d849dacde1c6dbdb7df12e3.res"]
+
+[params]
+

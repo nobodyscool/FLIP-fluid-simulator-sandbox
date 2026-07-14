@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://v4lwfcclvm33"
+path="res://.godot/imported/enforce_solids.glsl-a37a58565e675d98e51c564eb8997b8d.res"
+
+[deps]
+
+source_file="res://shaders/enforce_solids.glsl"
+dest_files=["res://.godot/imported/enforce_solids.glsl-a37a58565e675d98e51c564eb8997b8d.res"]
+
+[params]
+

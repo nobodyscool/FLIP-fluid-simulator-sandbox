@@ -1,0 +1,20 @@
+[gd_scene format=3 uid="uid://20cid13vvjrm"]
+
+[ext_resource type="Script" uid="uid://cw1hfyds4vbdm" path="res://scripts/main.gd" id="1_main"]
+
+[node name="Main" type="Node2D" unique_id=1527691939]
+visible = false
+script = ExtResource("1_main")
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=1659695597]
+
+[node name="Info" type="Label" parent="HUD" unique_id=1794906833]
+offset_left = 10.0
+offset_top = 8.0
+offset_right = 720.0
+offset_bottom = 360.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 16
+text = "initializing..."

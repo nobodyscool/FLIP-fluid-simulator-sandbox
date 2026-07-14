@@ -1,0 +1,35 @@
+# Godot 编辑器自动生成的本地缓存目录
+# 包含着色器缓存、资源导入产物(.ctex)、编辑器布局/折叠状态等
+# 均可由源文件重新生成，且体积大、与本地环境相关，不应纳入版本控制
+.godot/
+
+# Godot 4 主要使用 Vulkan/GLES3，Windows 下 Mono/C# 项目会生成的构建产物
+# 本项目虽为纯 GDScript，但保留以防未来引入 C# 支持
+.mono/
+data_*/
+
+# 导出产物目录：构建输出，属于生成物而非源代码，体积大且可随时重新导出
+export/
+
+# 导出预设文件中可能包含本地签名密钥路径、密码库路径等本地敏感/环境相关信息
+# 如需团队共享导出配置模板，可手动改为追踪并移除敏感字段
+export_presets.cfg
+
+# Godot 编辑器/系统生成的临时和日志文件
+*.tmp
+logs/
+
+# Claude Code 本地权限与信任状态，因人而异，不应共享给团队或提交到仓库
+.claude/settings.local.json
+
+# Claude Code Skill 知识库（如 Godot API 参考文档），属于 AI 工具本地资源
+# 体积大且与游戏项目本身无关，可按需重新获取，不纳入版本控制
+.claude/skills/
+
+# 操作系统生成的元数据文件
+Thumbs.db
+.DS_Store
+
+# 常见编辑器/IDE 本地配置(如果团队成员使用不同编辑器，避免个人设置冲突)
+.vscode/
+.idea/

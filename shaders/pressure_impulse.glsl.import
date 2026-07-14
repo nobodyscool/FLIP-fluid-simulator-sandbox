@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://dlkuclu00lfn4"
+path="res://.godot/imported/pressure_impulse.glsl-e2a7a6287ff97ba3cd9ceff9c030b6a3.res"
+
+[deps]
+
+source_file="res://shaders/pressure_impulse.glsl"
+dest_files=["res://.godot/imported/pressure_impulse.glsl-e2a7a6287ff97ba3cd9ceff9c030b6a3.res"]
+
+[params]
+
