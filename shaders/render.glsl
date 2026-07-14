@@ -1,9 +1,13 @@
 #[compute]
 #version 450
 
-// Colourise each cell into a packed RGBA8 value for display (nearest-filtered
-// upscale gives the crisp 10x10 blocks). Also writes the probed cell's physical
-// fields into `probe` for the HUD. Dispatched over cell_count threads.
+// Produce a per-cell DATA texture consumed by water_display.gdshader:
+//   R = water coverage (255 if the cell holds fluid, else 0)
+//   G = encoded cell-centre velocity X   (0.5 == 0, scaled by V_MAX)
+//   B = encoded cell-centre velocity Y
+//   A = base type code: air=0, solid=85, vacuum=170
+// Also writes the probed cell's physical fields for the HUD.
+// Dispatched over cell_count threads.
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -16,9 +20,9 @@ layout(push_constant, std430) uniform Params {
 	uint rng_seed; int mouse_cx; int mouse_cy; int clear_mode;
 } pc;
 
-const int VACUUM = 0;
 const int SOLID  = 1;
-const int AIR    = 3;
+const int VACUUM = 0;
+const float V_MAX = 60.0; // velocity scale used for the refraction encoding
 
 layout(set = 0, binding = 3,  std430) restrict buffer GridU { float grid_u[]; };
 layout(set = 0, binding = 4,  std430) restrict buffer GridV { float grid_v[]; };
@@ -29,7 +33,12 @@ layout(set = 0, binding = 14, std430) restrict buffer PA    { float p_a[]; };
 layout(set = 0, binding = 17, std430) restrict buffer Disp  { uint display[]; };
 layout(set = 0, binding = 18, std430) restrict buffer Probe { float probe[]; };
 
-uint pack(int r, int g, int b) { return uint(r) | (uint(g) << 8) | (uint(b) << 16) | (255u << 24); }
+uint pack(int r, int g, int b, int a) {
+	return uint(r) | (uint(g) << 8) | (uint(b) << 16) | (uint(a) << 24);
+}
+int enc_vel(float v) {
+	return int(clamp(clamp(v / V_MAX, -1.0, 1.0) * 0.5 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
+}
 
 void main() {
 	int c = int(gl_GlobalInvocationID.x);
@@ -38,22 +47,14 @@ void main() {
 	int j = c / pc.nx;
 	int t = cell_type[c];
 
-	uint col;
-	if (t == SOLID) {
-		col = pack(64, 64, 64);            // dark gray
-	} else if (fluid_mask[c] == 1) {
-		col = pack(38, 108, 230);          // water blue
-	} else if (t == AIR) {
-		col = pack(128, 128, 128);         // gray
-	} else {
-		col = pack(0, 0, 0);               // vacuum black
-	}
-	display[c] = col;
+	float uc = 0.5 * (grid_u[i + j * (pc.nx + 1)] + grid_u[(i + 1) + j * (pc.nx + 1)]);
+	float vc = 0.5 * (grid_v[i + j * pc.nx] + grid_v[i + (j + 1) * pc.nx]);
 
-	// HUD probe for the cell under the mouse.
+	int r = (fluid_mask[c] == 1) ? 255 : 0;
+	int a = (t == SOLID) ? 85 : ((t == VACUUM) ? 170 : 0);
+	display[c] = pack(r, enc_vel(uc), enc_vel(vc), a);
+
 	if (i == pc.mouse_cx && j == pc.mouse_cy) {
-		float uc = 0.5 * (grid_u[i + j * (pc.nx + 1)] + grid_u[(i + 1) + j * (pc.nx + 1)]);
-		float vc = 0.5 * (grid_v[i + j * pc.nx] + grid_v[i + (j + 1) * pc.nx]);
 		probe[0] = float(t);
 		probe[1] = uc;
 		probe[2] = vc;

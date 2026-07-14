@@ -23,9 +23,28 @@ const MAT_PREVIEW := [
 ]
 const PRESSURE_PREVIEW := Color(0.95, 0.75, 0.1, 0.6)
 
+# ---- inspector-tunable parameters (defaults match the in-code values) ----
+@export_group("Simulation")
+@export var particle_capacity: int = 1048576   # pool size; applied at startup only
+@export_range(0.0, 1.0, 0.01) var flip_ratio: float = 0.90
+@export var jacobi_iters: int = 60
+@export var gravity: float = 40.0
+
+@export_group("Rendering")
+@export var background: Texture2D               # background image (null -> background_color)
+@export var background_color: Color = Color(0.5, 0.5, 0.5)  # air gray
+@export var water_color: Color = Color(0.12, 0.42, 0.85)
+@export_range(0.0, 1.0, 0.01) var water_opacity: float = 0.55
+@export_range(0.0, 0.2, 0.005) var refraction: float = 0.03
+@export var smooth_water: bool = true   # off = sharp 10x10 water blocks like the original
+
 var solver: FlipFluidGPU
-var _tex: ImageTexture
-var _sprite: Sprite2D
+var _fluid_tex: ImageTexture
+var _overlay_tex: ImageTexture
+var _overlay_img: Image
+var _display: Sprite2D
+var _overlay: Sprite2D
+var _mat: ShaderMaterial
 
 # interaction state
 var _paused := false
@@ -55,24 +74,13 @@ func _ready() -> void:
 	if DEBUG_CAPTURE:
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	solver = FlipFluidGPU.new()
+	solver.capacity = maxi(1024, particle_capacity)  # fixed at startup
+	solver.flip_ratio = flip_ratio
+	solver.jacobi_iters = jacobi_iters
+	solver.gravity = gravity
 	solver.init_solver(GRID_W, GRID_H)
 
-	var img := Image.create(GRID_W, GRID_H, false, Image.FORMAT_RGBA8)
-	_tex = ImageTexture.create_from_image(img)
-
-	# Retained-mode display: 160x120 texture scaled 10x with nearest filtering.
-	# Placed in a CanvasLayer (layer 0, below the HUD) because the default
-	# world-2D canvas does not present alongside the per-frame local-RD sync.
-	var display_layer := CanvasLayer.new()
-	display_layer.layer = 0
-	add_child(display_layer)
-	_sprite = Sprite2D.new()
-	_sprite.texture = _tex
-	_sprite.centered = false
-	_sprite.scale = Vector2(CELL_PX, CELL_PX)
-	_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	display_layer.add_child(_sprite)
-
+	_setup_display()
 	_seed_initial_water()
 
 	if SELFTEST:
@@ -86,6 +94,52 @@ func _ready() -> void:
 				m.encode_s32((x + y * GRID_W) * 4, 1)
 		solver.commit_brush(m, 0, 1, 60.0, Vector2(65, 65), 123)  # pressure impulse
 		print("SELFTEST: clear_pressure/clear_velocity/pressure_impulse dispatched OK")
+
+
+# All visible content lives in a CanvasLayer: the default world-2D canvas does
+# not present alongside the per-frame local-RenderingDevice submit/sync.
+func _setup_display() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 0
+	add_child(layer)
+
+	_fluid_tex = ImageTexture.create_from_image(
+		Image.create(GRID_W, GRID_H, false, Image.FORMAT_RGBA8))
+	_mat = ShaderMaterial.new()
+	_mat.shader = load("res://shaders/water_display.gdshader")
+	_mat.set_shader_parameter("fluid_nearest", _fluid_tex)
+	_mat.set_shader_parameter("fluid_linear", _fluid_tex)
+	_apply_render_params()
+
+	# Fluid layer: 160x120 data texture scaled 10x, composited by the shader.
+	_display = Sprite2D.new()
+	_display.texture = _fluid_tex
+	_display.centered = false
+	_display.scale = Vector2(CELL_PX, CELL_PX)
+	_display.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_display.material = _mat
+	layer.add_child(_display)
+
+	# Overlay layer (brush preview + radius cursor) drawn on top with alpha.
+	_overlay_img = Image.create(GRID_W, GRID_H, false, Image.FORMAT_RGBA8)
+	_overlay_tex = ImageTexture.create_from_image(_overlay_img)
+	_overlay = Sprite2D.new()
+	_overlay.texture = _overlay_tex
+	_overlay.centered = false
+	_overlay.scale = Vector2(CELL_PX, CELL_PX)
+	_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	layer.add_child(_overlay)
+
+
+func _apply_render_params() -> void:
+	_mat.set_shader_parameter("has_bg", background != null)
+	if background != null:
+		_mat.set_shader_parameter("bg_tex", background)
+	_mat.set_shader_parameter("bg_color", background_color)
+	_mat.set_shader_parameter("water_tint", water_color)
+	_mat.set_shader_parameter("water_opacity", water_opacity)
+	_mat.set_shader_parameter("refraction", refraction)
+	_mat.set_shader_parameter("smooth_water", smooth_water)
 
 
 const TEST_SCENE := false   # true = pre-built solid container + water + air showcase
@@ -134,6 +188,11 @@ func _exit_tree() -> void:
 
 func _process(delta: float) -> void:
 	_frame_dt = delta
+	# live inspector tweaks (capacity is fixed once buffers are allocated)
+	solver.flip_ratio = flip_ratio
+	solver.jacobi_iters = jacobi_iters
+	solver.gravity = gravity
+
 	var mp := get_local_mouse_position()
 	_mouse_cell = Vector2i(
 		clampi(int(mp.x / CELL_PX), 0, GRID_W - 1),
@@ -143,11 +202,11 @@ func _process(delta: float) -> void:
 	solver.step(SUBSTEPS, not _paused, _mouse_cell.x, _mouse_cell.y)
 	_last_step_us = float(Time.get_ticks_usec() - t0)
 
-	# pull the tiny display buffer back, composite the brush overlay, upload
+	# upload the fluid DATA texture (shader composites it over the background)
 	var bytes := solver.read_display()
-	var img := Image.create_from_data(GRID_W, GRID_H, false, Image.FORMAT_RGBA8, bytes)
-	_composite_overlay(img)
-	_tex.update(img)
+	_fluid_tex.update(Image.create_from_data(GRID_W, GRID_H, false, Image.FORMAT_RGBA8, bytes))
+	_update_overlay()
+	_apply_render_params()
 
 	_update_hud()
 
@@ -155,29 +214,27 @@ func _process(delta: float) -> void:
 		_debug_tick()
 
 
-# Paint the brush preview cells and the radius cursor directly into the
-# 160x120 image (cell-resolution, matching the blocky aesthetic).
-func _composite_overlay(img: Image) -> void:
+# Brush preview cells + radius cursor, drawn into the transparent overlay image.
+func _update_overlay() -> void:
+	_overlay_img.fill(Color(0, 0, 0, 0))
 	if _dragging:
 		var col: Color = PRESSURE_PREVIEW if _pressure_mode else MAT_PREVIEW[_brush_material]
 		for cell in _painted:
-			_blend_px(img, cell.x, cell.y, col)
+			_set_px(cell.x, cell.y, col)
 
-	# radius cursor: ring of cells at distance ~= brush_radius from the mouse
 	var cursor: Color = PRESSURE_PREVIEW if _pressure_mode else Color(1, 1, 1, 0.85)
 	var r := _brush_radius
 	var steps := maxi(16, int(TAU * r))
 	for s in steps:
 		var a := TAU * float(s) / float(steps)
-		var cx := int(round(_mouse_cell.x + 0.5 + cos(a) * r - 0.5))
-		var cy := int(round(_mouse_cell.y + 0.5 + sin(a) * r - 0.5))
-		_blend_px(img, cx, cy, cursor)
+		_set_px(int(round(_mouse_cell.x + cos(a) * r)), int(round(_mouse_cell.y + sin(a) * r)), cursor)
+	_overlay_tex.update(_overlay_img)
 
 
-func _blend_px(img: Image, x: int, y: int, col: Color) -> void:
+func _set_px(x: int, y: int, col: Color) -> void:
 	if x < 0 or x >= GRID_W or y < 0 or y >= GRID_H:
 		return
-	img.set_pixel(x, y, img.get_pixel(x, y).lerp(col, col.a))
+	_overlay_img.set_pixel(x, y, col)
 
 
 func _debug_tick() -> void:

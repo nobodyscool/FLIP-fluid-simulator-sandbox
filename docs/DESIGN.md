@@ -109,13 +109,20 @@ p_new = ( Σ p_neighbour  −  divergence / phys_dt ) / count
 **投影（`project.glsl`）**：对每个内部面 `u -= dt·(p_R − p_L)`，其中固体侧面速度直接置 0，
 空 cell 侧用 `p_atm`。之后再跑一次 `enforce_solids`。
 
-## 7. 渲染、回读与 HUD
+## 7. 渲染：数据纹理 + 着色器合成、回读与 HUD
 
-`render.glsl` 每 cell 输出打包 RGBA8：固体→深灰、含水(fluid_mask)→蓝、气→灰、真空→黑
-（水是粒子驱动的动态量，绘制时取粒子存在性，而非静态类型）。CPU 回读该 19 200-uint 缓冲，
-`Image.create_from_data(FORMAT_RGBA8)`，合成画笔预览/光标后 `ImageTexture.update`，贴到一个
-**Sprite2D**（`scale=10` + **NEAREST** 过滤 → 无插值的清晰 10×10 方块）。同一 render pass 把鼠标
-cell 的物理量写入 `probe` 供 HUD。
+`render.glsl` 每 cell 输出的**不是最终颜色而是数据**（打包 RGBA8）：
+`R=`含水覆盖(fluid_mask→0/255)、`G/B=`编码的 cell 中心速度（供折射方向）、
+`A=`底材类型码（气 0 / 固体 85 / 真空 170）。CPU 回读该 19 200-uint 缓冲上传到 `_fluid_tex`。
+
+显示由 **`shaders/water_display.gdshader`**（canvas_item）合成，挂在一个带 `ShaderMaterial` 的
+**Sprite2D**（`scale=10`）上：
+- 底：气 cell 显示**背景**（`background` 图片，未设则 `background_color` 灰）；固体→深灰、真空→黑（NEAREST 采样，清晰方块）。
+- 水：`R` 覆盖用 LINEAR 采样得平滑边缘；**半透明**地叠在底之上（`water_opacity`），并按 cell 速度对
+  背景做 **UV 偏移的伪折射**（`refraction`）。同一纹理绑两次（`filter_nearest`/`filter_linear`）以兼顾
+  清晰方块与平滑水面。
+
+同一 render pass 把鼠标 cell 的物理量写入 `probe` 供 HUD。
 
 > **重要（呈现坑）**：显示 Sprite2D 与 HUD 都挂在 **CanvasLayer** 下。实测本机 D3D12 上，每帧对
 > local RenderingDevice 做 `submit()/sync()` 时，主视口的**默认世界 2D 画布不呈现到窗口**（表现为
@@ -123,15 +130,26 @@ cell 的物理量写入 `probe` 供 HUD。
 > 窗口用 `stretch/mode=canvas_items` + `aspect=keep`，逻辑分辨率固定 1600×1200，初始物理窗口
 > 1280×960 以适配 1080p 屏幕（可自由缩放/最大化，等比缩放保持清晰）。
 
+**材质语义补充**：
+- **默认背景 = 气**（`cell_type` 初始全填 `AIR`），液面自由边界仍用 `p_atm` ghost。
+- **真空 = 排水口**：`drain.glsl` 每子步把落在 VACUUM cell 的水粒子回收（active 数下降），实现“液体
+  接触真空即消失”。
+
 ## 8. 画笔预览与提交（两阶段交互）
 
-- 拖拽中：`main.gd` 用 CPU 把画笔圆覆盖的 cell 累积进集合（`_painted`），每帧**合成进显示图像**
-  （半透明色块预览 + 跟随鼠标的半径光标，cell 分辨率）。此阶段**完全不碰仿真缓冲**。
+- 拖拽中：`main.gd` 用 CPU 把画笔圆覆盖的 cell 累积进集合（`_painted`），每帧画进一张**独立的透明
+  overlay 纹理**（半透明色块预览 + 跟随鼠标的半径光标，cell 分辨率），叠在流体 Sprite2D 之上。此阶段
+  **完全不碰仿真缓冲**。
 - 松开：把 `_painted` 打包成 `brush_mask` 上传 GPU，按材质分派：水→`emit`；真空/气/固体→
   `free_particles`+`brush_apply`；压力笔→`pressure_impulse`。之后才参与物理演算。
 
-## 9. 可调参数（`FlipFluidGPU` 顶部导出/常量）
+## 9. 可调参数
 
-`capacity`(1 048 576)、`phys_dt`(1/240)、`gravity`(40 cells/s²)、`flip_ratio`(0.90)、
-`p_atm`(3.0)、`jacobi_iters`(60)、`fixed_scale`(4096)、`emit_ppc`(16)；子步数在 `main.gd`
-`SUBSTEPS`(4)。运行时 HUD 全量显示。
+**`main.gd` 检视器 `@export`（默认值与代码一致，运行时可改）**：
+- Simulation：`particle_capacity`(1 048 576，仅启动时生效)、`flip_ratio`(0.90)、`jacobi_iters`(60)、
+  `gravity`(40)。后三者每帧同步到求解器，可运行时实时调。
+- Rendering：`background`(Texture2D，空则用灰)、`background_color`(0.5 灰=气)、`water_color`、
+  `water_opacity`(0.55)、`refraction`(0.03)。
+
+**其余在 `FlipFluidGPU` 顶部 / `main.gd` 常量**：`phys_dt`(1/240)、`p_atm`(3.0)、`fixed_scale`(4096)、
+`emit_ppc`(16)、`SUBSTEPS`(4)。运行时 HUD 全量显示。

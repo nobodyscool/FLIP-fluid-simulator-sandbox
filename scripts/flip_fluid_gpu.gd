@@ -48,6 +48,7 @@ var _shader_bindings := {
 	"jacobi":          [12, 13, 14, 15, 16],
 	"project":         [3, 4, 12, 13, 14],
 	"g2p_advect":      [0, 3, 4, 5, 6, 12],
+	"drain":           [0, 1, 2, 12],
 	"emit":            [0, 1, 2, 12, 19],
 	"free_particles":  [0, 1, 2, 19],
 	"brush_apply":     [12, 19],
@@ -103,7 +104,7 @@ func _create_buffers() -> void:
 	_buf[9]  = _new_buf(u_count * 4)            # wt_u
 	_buf[10] = _new_buf(v_count * 4)            # wt_v
 	_buf[11] = _new_buf(cell_count * 4)         # mass
-	_buf[12] = _new_buf(cell_count * 4)         # cell_type (0 = vacuum)
+	_buf[12] = _new_buf_data(_filled(cell_count, T_AIR))  # cell_type (default air)
 	_buf[13] = _new_buf(cell_count * 4)         # fluid_mask
 	_buf[14] = _new_buf(cell_count * 4)         # pressure_a
 	_buf[15] = _new_buf(cell_count * 4)         # pressure_b
@@ -128,6 +129,14 @@ func _ints(values: Array) -> PackedByteArray:
 	pa.resize(values.size() * 4)
 	for i in values.size():
 		pa.encode_s32(i * 4, int(values[i]))
+	return pa
+
+
+func _filled(count: int, value: int) -> PackedByteArray:
+	var pa := PackedByteArray()
+	pa.resize(count * 4)
+	for i in count:
+		pa.encode_s32(i * 4, value)
 	return pa
 
 
@@ -226,6 +235,7 @@ func step(substeps: int, run_physics: bool, mouse_cx: int, mouse_cy: int) -> voi
 			_dispatch(cl, "project", fgroups)
 			_dispatch(cl, "enforce_solids", fgroups)
 			_dispatch(cl, "g2p_advect", pgroups)
+			_dispatch(cl, "drain", pgroups)      # vacuum destroys water
 	_dispatch(cl, "render", cgroups)
 	rd.compute_list_end()
 	rd.submit()
