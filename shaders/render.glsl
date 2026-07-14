@@ -22,7 +22,8 @@ layout(push_constant, std430) uniform Params {
 
 const int SOLID  = 1;
 const int VACUUM = 0;
-const float V_MAX = 60.0; // velocity scale used for the refraction encoding
+const float V_MAX = 60.0;      // velocity scale used for the refraction encoding
+const float FOAM_REF = 18.0;   // particle count treated as a "full/deep" cell
 
 layout(set = 0, binding = 3,  std430) restrict buffer GridU { float grid_u[]; };
 layout(set = 0, binding = 4,  std430) restrict buffer GridV { float grid_v[]; };
@@ -50,7 +51,11 @@ void main() {
 	float uc = 0.5 * (grid_u[i + j * (pc.nx + 1)] + grid_u[(i + 1) + j * (pc.nx + 1)]);
 	float vc = 0.5 * (grid_v[i + j * pc.nx] + grid_v[i + (j + 1) * pc.nx]);
 
-	int r = (fluid_mask[c] == 1) ? 255 : 0;
+	// R = per-cell "fullness" (density): 0 = no water, small = thin/surface/spray,
+	// 1 = deep packed water. Drives the per-cell foam (thin -> whiter).
+	float density = float(mass[c]) / pc.fixed_scale;
+	float fullness = clamp(density / FOAM_REF, 0.0, 1.0);
+	int r = (fluid_mask[c] == 1) ? max(1, int(fullness * 255.0 + 0.5)) : 0;
 	int a = (t == SOLID) ? 85 : ((t == VACUUM) ? 170 : 0);
 	display[c] = pack(r, enc_vel(uc), enc_vel(vc), a);
 

@@ -36,7 +36,25 @@ const PRESSURE_PREVIEW := Color(0.95, 0.75, 0.1, 0.6)
 @export var water_color: Color = Color(0.12, 0.42, 0.85)
 @export_range(0.0, 1.0, 0.01) var water_opacity: float = 0.55
 @export_range(0.0, 0.2, 0.005) var refraction: float = 0.03
-@export var smooth_water: bool = true   # off = sharp 10x10 water blocks like the original
+# 水面渲染：false=每个 cell 一种颜色（清晰像素块，默认）；true=cell 间平滑过渡。
+@export var smooth_water: bool = false
+
+@export_group("Foam 泡沫泛白")
+# 总开关：泡沫（水色蓝→白）。关掉则水面纯蓝，无泛白。
+@export var enable_foam: bool = true
+# 泡沫颜色，默认白色（极端泡沫=纯白）。
+@export var foam_color: Color = Color(1, 1, 1)
+# 泡沫最强白度：1=极端处纯白；越小整体泛白越弱。逐 cell 生效，一个格子一种颜色。
+@export_range(0.0, 1.0, 0.01) var foam_amount: float = 0.9
+
+# 流速增益：越大，快速运动的浅水/水珠越白（→显著白）。深水由 foam_depth 挡住，不受影响。
+@export_range(0.0, 6.0, 0.1) var foam_speed_gain: float = 3.5
+
+# 平静薄水面的泡沫底量：0=只有流动的水才泛白；越大浅水静止时也越白（→微微泛白）。
+@export_range(0.0, 1.0, 0.01) var foam_edge_base: float = 0.10
+
+# 深水截止：cell 充盈度(密度)≥此值就完全不泛白（即使流速很快）。越小=越"挑"，只有很薄的水/水珠才泛白。
+@export_range(0.05, 1.0, 0.01) var foam_depth: float = 0.2
 
 var solver: FlipFluidGPU
 var _fluid_tex: ImageTexture
@@ -140,6 +158,12 @@ func _apply_render_params() -> void:
 	_mat.set_shader_parameter("water_opacity", water_opacity)
 	_mat.set_shader_parameter("refraction", refraction)
 	_mat.set_shader_parameter("smooth_water", smooth_water)
+	_mat.set_shader_parameter("enable_foam", enable_foam)
+	_mat.set_shader_parameter("foam_color", foam_color)
+	_mat.set_shader_parameter("foam_amount", foam_amount)
+	_mat.set_shader_parameter("foam_speed_gain", foam_speed_gain)
+	_mat.set_shader_parameter("foam_edge_base", foam_edge_base)
+	_mat.set_shader_parameter("foam_depth", foam_depth)
 
 
 const TEST_SCENE := false   # true = pre-built solid container + water + air showcase
