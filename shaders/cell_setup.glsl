@@ -26,6 +26,7 @@ layout(set = 0, binding = 13, std430) restrict buffer Fluid { int fluid_mask[]; 
 layout(set = 0, binding = 16, std430) restrict buffer Div   { float divergence[]; };
 layout(set = 0, binding = 21, std430) restrict buffer PhaseCnt { int phase_count[]; };
 layout(set = 0, binding = 22, std430) restrict buffer RhoCell  { float rho_cell[]; };
+layout(set = 0, binding = 23, std430) restrict buffer SMask    { int solid_mask[]; };
 
 // Per-phase rest density (must match render.glsl): 0=water 1=lemon-juice 2=honey.
 const float RHO[3] = float[](1.0, 1.4, 2.0);
@@ -36,7 +37,8 @@ void main() {
 	int i = c % pc.nx;
 	int j = c / pc.nx;
 
-	bool fluid = (cell_type[c] != SOLID) && (mass[c] > 0);
+	// Movable-solid cells are walls this frame, never fluid.
+	bool fluid = (cell_type[c] != SOLID) && (solid_mask[c] != 1) && (mass[c] > 0);
 	fluid_mask[c] = fluid ? 1 : 0;
 
 	// Per-cell density = count-weighted average of the phase densities. Non-fluid

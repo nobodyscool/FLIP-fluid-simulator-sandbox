@@ -25,9 +25,23 @@ const MAT_PREVIEW := [
 ]
 const PRESSURE_PREVIEW := Color(0.95, 0.75, 0.1, 0.6)
 
+# --- movable solids (bottle / lemon chunk / ice cube) ---
+enum Tool { MATERIAL, LEMON_CHUNK, ICE_CHUNK, DRAW_SOLID }
+const SOLID_BROWN := Color(0.5, 0.32, 0.15)          # drawn movable solid (bottle)
+const LEMON_CHUNK_COLOR := Color(0.80, 0.83, 0.22)   # lemon chunk (yellow-green)
+const ICE_COLOR := Color(0.75, 0.88, 0.96)           # ice cube (pale cyan)
+const ICE_HALF := 4.0        # ice square half-extent (cells) -> ~8x8
+const LEMON_R := 6.0         # lemon half-disk radius (cells)
+const ICE_DENSITY := 0.85    # < water(1.0) -> floats
+const LEMON_DENSITY := 1.15  # > water, < lemon-juice(1.4)/honey(2.0) -> sinks in water
+const BODY_LIN_DAMP := 1.5   # linear velocity damping (1/s)
+const BODY_ANG_DAMP := 2.5   # angular velocity damping (1/s)
+const BODY_DRAG := 0.8       # coupling to surrounding fluid velocity
+const ROT_STEP := 0.15       # radians per wheel notch in drag mode
+
 # ---- inspector-tunable parameters (defaults match the in-code values) ----
 @export_group("Simulation")
-@export var particle_capacity: int = 524288   # pool size; applied at startup only 524288
+@export var particle_capacity: int = 1048576   # pool size; applied at startup only 524288
 @export_range(0.0, 1.0, 0.01) var flip_ratio: float = 0.90
 @export var jacobi_iters: int = 60
 @export var gravity: float = 40.0
@@ -91,6 +105,18 @@ var _dragging := false
 var _painted := {}                 # Vector2i -> true, accumulated during a drag
 var _mouse_cell := Vector2i(-1, -1)
 
+# movable-solid state
+var _tool := Tool.MATERIAL
+var _drag_mode := false             # C: mouse drags/rotates movable solids
+var _solids: Array[MovableSolid] = []
+var _grabbed: MovableSolid = null
+var _grab_offset := Vector2.ZERO
+var _solid_mask := PackedByteArray()   # uploaded each frame (int per cell)
+var _solid_vel := PackedByteArray()    # uploaded each frame (2 floats per cell)
+var _last_display := PackedByteArray() # previous frame's display, for buoyancy
+var _preview_lemon: MovableSolid       # ghost outline at the cursor for Q/W tools
+var _preview_ice: MovableSolid
+
 # HUD timing
 var _frame_dt := 0.0
 
@@ -113,6 +139,11 @@ func _ready() -> void:
 	solver.jacobi_iters = jacobi_iters
 	solver.gravity = gravity
 	solver.init_solver(GRID_W, GRID_H)
+
+	_solid_mask.resize(GRID_W * GRID_H * 4)       # int per cell
+	_solid_vel.resize(GRID_W * GRID_H * 2 * 4)    # vec2 per cell
+	_preview_lemon = MovableSolid.make_halfdisk(Vector2.ZERO, LEMON_R, LEMON_CHUNK_COLOR, LEMON_DENSITY, true)
+	_preview_ice = MovableSolid.make_square(Vector2.ZERO, ICE_HALF, ICE_COLOR, ICE_DENSITY, true)
 
 	_setup_display()
 	_seed_initial_water()
@@ -188,9 +219,13 @@ func _apply_render_params() -> void:
 
 
 const TEST_SCENE := false        # true = pre-built solid container + water + air showcase
-const TEST_MULTIPHASE := true    # true = honey/lemon sinking through water (density layering)
+const TEST_MULTIPHASE := false   # true = honey/lemon sinking through water (density layering)
+const TEST_SOLIDS := true        # true = water pool + floating ice / sinking lemon + sloshing bar
 
 func _seed_initial_water() -> void:
+	if TEST_SOLIDS:
+		_setup_solids_demo()
+		return
 	if TEST_MULTIPHASE:
 		_setup_multiphase_demo()
 		return
@@ -217,6 +252,26 @@ func _setup_multiphase_demo() -> void:
 	_paint_rect(FlipFluidGPU.T_WATER, 0, 34, 24, 126, 50)     # top    -> blue
 	_paint_rect(FlipFluidGPU.T_LEMON, 0, 34, 50, 126, 76)     # middle -> green
 	_paint_rect(FlipFluidGPU.T_HONEY, 0, 34, 76, 126, 102)    # bottom -> yellow
+
+
+func _setup_solids_demo() -> void:
+	# Container + a water pool in the lower half.
+	_paint_rect(FlipFluidGPU.T_SOLID, 0, 30, 20, 34, 106)     # left wall
+	_paint_rect(FlipFluidGPU.T_SOLID, 0, 126, 20, 130, 106)   # right wall
+	_paint_rect(FlipFluidGPU.T_SOLID, 0, 30, 102, 130, 106)   # floor
+	_paint_rect(FlipFluidGPU.T_WATER, 0, 34, 58, 126, 102)    # water pool
+	# Dynamic bodies dropped just above the water: ice (light) should bob up and
+	# float, the lemon chunk (denser than water) should sink to the bottom.
+	# two ice cubes (test ice-ice collision + stable floating, no fly-out)
+	_add_solid(MovableSolid.make_square(Vector2(54, 42), ICE_HALF, ICE_COLOR, ICE_DENSITY, true))
+	_add_solid(MovableSolid.make_square(Vector2(64, 28), ICE_HALF, ICE_COLOR, ICE_DENSITY, true))
+	_add_solid(MovableSolid.make_halfdisk(Vector2(102, 44), LEMON_R, LEMON_CHUNK_COLOR, LEMON_DENSITY, true))
+
+
+func _add_solid(b: MovableSolid) -> void:
+	b.prev_pos = b.pos
+	b.prev_angle = b.angle
+	_solids.append(b)
 
 
 func _paint_rect(mat: int, mode: int, x0: int, y0: int, x1: int, y1: int) -> void:
@@ -260,13 +315,19 @@ func _process(delta: float) -> void:
 		clampi(int(mp.x / CELL_PX), 0, GRID_W - 1),
 		clampi(int(mp.y / CELL_PX), 0, GRID_H - 1))
 
+	# movable solids: integrate dynamic bodies (buoyancy from last frame's fluid),
+	# then rasterise the current poses and upload them for this step.
+	if not _paused:
+		_update_solid_dynamics(delta)
+	_rasterize_and_upload(delta)
+
 	var t0 := Time.get_ticks_usec()
 	solver.step(SUBSTEPS, not _paused, _mouse_cell.x, _mouse_cell.y)
 	_last_step_us = float(Time.get_ticks_usec() - t0)
 
 	# upload the fluid DATA texture (shader composites it over the background)
-	var bytes := solver.read_display()
-	_fluid_tex.update(Image.create_from_data(GRID_W, GRID_H, false, Image.FORMAT_RGBA8, bytes))
+	_last_display = solver.read_display()
+	_fluid_tex.update(Image.create_from_data(GRID_W, GRID_H, false, Image.FORMAT_RGBA8, _last_display))
 	_update_overlay()
 	_apply_render_params()
 
@@ -280,9 +341,27 @@ func _process(delta: float) -> void:
 func _update_overlay() -> void:
 	_overlay_img.fill(Color(0, 0, 0, 0))
 	if _dragging:
-		var col: Color = PRESSURE_PREVIEW if _pressure_mode else MAT_PREVIEW[_brush_material]
+		var col: Color
+		if _tool == Tool.DRAW_SOLID:
+			col = Color(SOLID_BROWN, 0.7)          # drawing a movable solid -> brown
+		elif _pressure_mode:
+			col = PRESSURE_PREVIEW
+		else:
+			col = MAT_PREVIEW[_brush_material]
 		for cell in _painted:
 			_set_px(cell.x, cell.y, col)
+
+	# chunk placement ghost: show the shape that a Q/W click will drop at the cursor
+	if not _drag_mode and (_tool == Tool.LEMON_CHUNK or _tool == Tool.ICE_CHUNK):
+		var ghost: MovableSolid = _preview_ice if _tool == Tool.ICE_CHUNK else _preview_lemon
+		ghost.pos = _mouse_grid()
+		var gcol := Color(ghost.color, 0.55)
+		for cell in _body_cells(ghost, ghost.pos, 0.0):
+			_set_px(int(cell.x), int(cell.y), gcol)
+
+	# movable solids drawn opaque on top (they occlude the liquid behind them)
+	for b in _solids:
+		_draw_solid_overlay(b)
 
 	var cursor: Color = PRESSURE_PREVIEW if _pressure_mode else Color(1, 1, 1, 0.85)
 	var r := _brush_radius
@@ -317,31 +396,366 @@ func _unhandled_input(event: InputEvent) -> void:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT:
 			if mb.pressed:
-				_dragging = true
-				_painted.clear()
-				_add_brush_cells()
+				_on_left_press()
 			else:
-				_commit_stroke()
+				_on_left_release()
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
-			_brush_radius = clampf(_brush_radius + 1.0, 0.5, 40.0)
+			if _drag_mode and _grabbed != null:
+				_grabbed.angle += ROT_STEP
+			else:
+				_brush_radius = clampf(_brush_radius + 1.0, 0.5, 40.0)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
-			_brush_radius = clampf(_brush_radius - 1.0, 0.5, 40.0)
+			if _drag_mode and _grabbed != null:
+				_grabbed.angle -= ROT_STEP
+			else:
+				_brush_radius = clampf(_brush_radius - 1.0, 0.5, 40.0)
 
-	elif event is InputEventMouseMotion and _dragging:
-		_add_brush_cells()
+	elif event is InputEventMouseMotion:
+		if _drag_mode and _grabbed != null:
+			_grabbed.pos = (_mouse_grid() + _grab_offset).clamp(
+				Vector2(1, 1), Vector2(GRID_W - 1, GRID_H - 1))
+		elif _dragging:
+			_add_brush_cells()
 
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_SPACE: _paused = not _paused
-			KEY_1: _pressure_mode = false; _brush_material = FlipFluidGPU.T_VACUUM
-			KEY_2: _pressure_mode = false; _brush_material = FlipFluidGPU.T_SOLID
-			KEY_3: _pressure_mode = false; _brush_material = FlipFluidGPU.T_WATER
-			KEY_4: _pressure_mode = false; _brush_material = FlipFluidGPU.T_AIR
-			KEY_5: _pressure_mode = false; _brush_material = FlipFluidGPU.T_LEMON
-			KEY_6: _pressure_mode = false; _brush_material = FlipFluidGPU.T_HONEY
-			KEY_0: _pressure_mode = true
+			KEY_1: _set_material(FlipFluidGPU.T_VACUUM)
+			KEY_2: _set_material(FlipFluidGPU.T_SOLID)
+			KEY_3: _set_material(FlipFluidGPU.T_WATER)
+			KEY_4: _set_material(FlipFluidGPU.T_AIR)
+			KEY_5: _set_material(FlipFluidGPU.T_LEMON)
+			KEY_6: _set_material(FlipFluidGPU.T_HONEY)
+			KEY_0: _tool = Tool.MATERIAL; _pressure_mode = true
+			KEY_Q: _tool = Tool.LEMON_CHUNK; _drag_mode = false
+			KEY_W: _tool = Tool.ICE_CHUNK; _drag_mode = false
+			KEY_9: _tool = Tool.DRAW_SOLID; _drag_mode = false
+			KEY_C: _drag_mode = not _drag_mode; _grabbed = null; _dragging = false
 			KEY_P: solver.clear_velocity()
 			KEY_V: solver.clear_pressure()
+
+
+func _set_material(mat: int) -> void:
+	_tool = Tool.MATERIAL
+	_pressure_mode = false
+	_brush_material = mat
+
+
+func _mouse_grid() -> Vector2:
+	var mp := get_local_mouse_position()
+	return Vector2(mp.x / CELL_PX, mp.y / CELL_PX)
+
+
+func _on_left_press() -> void:
+	if _drag_mode:
+		_grabbed = _body_at(_mouse_grid())
+		if _grabbed != null:
+			_grab_offset = _grabbed.pos - _mouse_grid()
+			_grabbed.prev_pos = _grabbed.pos    # no velocity spike on grab
+		return
+	match _tool:
+		Tool.LEMON_CHUNK:
+			_add_solid(MovableSolid.make_halfdisk(_mouse_grid(), LEMON_R,
+				LEMON_CHUNK_COLOR, LEMON_DENSITY, true))
+		Tool.ICE_CHUNK:
+			_add_solid(MovableSolid.make_square(_mouse_grid(), ICE_HALF,
+				ICE_COLOR, ICE_DENSITY, true))
+		_:
+			# DRAW_SOLID and normal material brushes both paint cells first
+			_dragging = true
+			_painted.clear()
+			_add_brush_cells()
+
+
+func _on_left_release() -> void:
+	if _drag_mode:
+		_grabbed = null
+		return
+	if not _dragging:
+		return
+	if _tool == Tool.DRAW_SOLID:
+		_dragging = false
+		if _painted.size() >= 2:
+			_create_or_merge_drawn(_painted.keys())
+		_painted.clear()
+	else:
+		_commit_stroke()
+
+
+# Create a drawn movable solid from the stroke, merging it with any existing
+# drawn solid it touches (4-adjacent or overlapping) so a shape drawn in several
+# strokes becomes one connected body. Chaining bridges multiple bodies into one.
+func _create_or_merge_drawn(new_cells: Array) -> void:
+	var cells := {}                       # union of all world cells -> true
+	for c in new_cells:
+		cells[c] = true
+	var merged := []
+	for b in _solids:
+		if b.kind != MovableSolid.Kind.DRAW:
+			continue
+		for cell in _body_cells(b, b.pos, b.angle):
+			if _cell_touches(Vector2i(int(cell.x), int(cell.y)), cells):
+				merged.append(b)
+				break
+	for b in merged:
+		for cell in _body_cells(b, b.pos, b.angle):
+			cells[Vector2i(int(cell.x), int(cell.y))] = true
+		if _grabbed == b:
+			_grabbed = null
+		_solids.erase(b)
+	_add_solid(MovableSolid.make_drawn(cells.keys(), SOLID_BROWN))
+
+
+func _cell_touches(ci: Vector2i, cells: Dictionary) -> bool:
+	return (cells.has(ci)
+		or cells.has(ci + Vector2i(1, 0)) or cells.has(ci + Vector2i(-1, 0))
+		or cells.has(ci + Vector2i(0, 1)) or cells.has(ci + Vector2i(0, -1)))
+
+
+func _body_at(gp: Vector2) -> MovableSolid:
+	for i in range(_solids.size() - 1, -1, -1):
+		var b := _solids[i]
+		var w := gp - b.pos
+		var ca := cos(b.angle)
+		var sa := sin(b.angle)
+		if b.contains_local(Vector2(w.x * ca + w.y * sa, -w.x * sa + w.y * ca)):
+			return b
+	return null
+
+
+# --- movable solid rasterisation / dynamics ------------------------------------
+
+# Cells covered by a body at the given pose (inverse mapping -> no holes),
+# clamped to the domain. Returns Vector2(x, y) integer cell coords.
+func _body_cells(b: MovableSolid, at: Vector2, ang: float) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	var R := b.bound_r
+	var ca := cos(ang)
+	var sa := sin(ang)
+	var x0 := clampi(int(floor(at.x - R)), 0, GRID_W - 1)
+	var x1 := clampi(int(ceil(at.x + R)), 0, GRID_W - 1)
+	var y0 := clampi(int(floor(at.y - R)), 0, GRID_H - 1)
+	var y1 := clampi(int(ceil(at.y + R)), 0, GRID_H - 1)
+	for y in range(y0, y1 + 1):
+		for x in range(x0, x1 + 1):
+			var wx := x + 0.5 - at.x
+			var wy := y + 0.5 - at.y
+			if b.contains_local(Vector2(wx * ca + wy * sa, -wx * sa + wy * ca)):
+				out.append(Vector2(x, y))
+	return out
+
+
+# Zero the upload buffers and stamp every body (mask + rigid velocity per cell).
+# Kinematic bodies (bottle / grabbed) take their velocity from the pose delta.
+func _rasterize_and_upload(delta: float) -> void:
+	var dt := maxf(delta, 1e-4)
+	for b in _solids:
+		if (not b.dynamic) or (b == _grabbed):
+			b.vel = (b.pos - b.prev_pos) / dt
+			b.omega = wrapf(b.angle - b.prev_angle, -PI, PI) / dt
+		b.prev_pos = b.pos
+		b.prev_angle = b.angle
+	_solid_mask.fill(0)
+	_solid_vel.fill(0)
+	for b in _solids:
+		for cell in _body_cells(b, b.pos, b.angle):
+			var x := int(cell.x)
+			var y := int(cell.y)
+			var c := x + y * GRID_W
+			_solid_mask.encode_s32(c * 4, 1)
+			var r := Vector2(x + 0.5 - b.pos.x, y + 0.5 - b.pos.y)
+			var v := b.vel + b.omega * Vector2(-r.y, r.x)
+			_solid_vel.encode_float(c * 8, v.x)
+			_solid_vel.encode_float(c * 8 + 4, v.y)
+	solver.upload_solids(_solid_mask, _solid_vel)
+
+
+func _draw_solid_overlay(b: MovableSolid) -> void:
+	for cell in _body_cells(b, b.pos, b.angle):
+		_set_px(int(cell.x), int(cell.y), b.color)
+
+
+# Integrate the dynamic (physics) bodies: gravity + buoyancy from the previous
+# frame's fluid, light drag toward the local flow, plus a buoyant righting torque.
+func _update_solid_dynamics(delta: float) -> void:
+	if _last_display.is_empty():
+		return
+	var dt := clampf(delta, 1e-4, 0.05)
+	# per-column topmost liquid cell (surface height); GRID_H = dry column
+	var surf := PackedInt32Array()
+	surf.resize(GRID_W)
+	for x in range(GRID_W):
+		surf[x] = GRID_H
+	for y in range(GRID_H):
+		var row := y * GRID_W
+		for x in range(GRID_W):
+			if _last_display[(row + x) * 4 + 3] >= 185 and y < surf[x]:
+				surf[x] = y
+	for b in _solids:
+		if b.dynamic and b != _grabbed:
+			_integrate_body(b, dt, surf)
+	_separate_bodies()
+
+
+# Resolve solid-solid overlaps by pushing bodies apart (a couple of relaxation
+# passes). Only movable (dynamic, not-grabbed) bodies get displaced; kinematic /
+# grabbed bodies hold their pose, so a moving bottle shoves a floating chunk aside.
+func _separate_bodies() -> void:
+	var n := _solids.size()
+	if n < 2:
+		return
+	for _iter in range(2):
+		var sets: Array[Dictionary] = []
+		for b in _solids:
+			var d := {}
+			for cell in _body_cells(b, b.pos, b.angle):
+				d[Vector2i(int(cell.x), int(cell.y))] = true
+			sets.append(d)
+		for i in range(n):
+			for j in range(i + 1, n):
+				var a: MovableSolid = _solids[i]
+				var bb: MovableSolid = _solids[j]
+				var a_move := a.dynamic and a != _grabbed
+				var b_move := bb.dynamic and bb != _grabbed
+				if not a_move and not b_move:
+					continue
+				var ov := _overlap_count(sets[i], sets[j])
+				if ov <= 0:
+					continue
+				var dir := bb.pos - a.pos
+				dir = dir.normalized() if dir.length() > 0.01 else Vector2(0, -1)
+				var push: float = minf(0.15 * float(ov), 3.0)
+				if a_move and b_move:
+					_push_body(a, -dir, push * 0.5)
+					_push_body(bb, dir, push * 0.5)
+				elif a_move:
+					_push_body(a, -dir, push)
+				else:
+					_push_body(bb, dir, push)
+
+
+func _overlap_count(sa: Dictionary, sb: Dictionary) -> int:
+	var small := sa if sa.size() <= sb.size() else sb
+	var big := sb if sa.size() <= sb.size() else sa
+	var c := 0
+	for k in small:
+		if big.has(k):
+			c += 1
+	return c
+
+
+func _push_body(b: MovableSolid, dir: Vector2, dist: float) -> void:
+	var newpos := (b.pos + dir * dist).clamp(Vector2(1, 1), Vector2(GRID_W - 1, GRID_H - 1))
+	if not _body_blocked(b, newpos):
+		b.pos = newpos
+	var vn := b.vel.dot(dir)      # cancel velocity heading further into the overlap
+	if vn < 0.0:
+		b.vel -= dir * vn
+
+
+func _integrate_body(b: MovableSolid, dt: float, surf: PackedInt32Array) -> void:
+	var g := solver.gravity
+	var cells := _body_cells(b, b.pos, b.angle)
+	var total := cells.size()
+	if total == 0:
+		return
+	# Ambient pool surface measured from the FREE columns beside the body, so water
+	# trapped on a flat top does not fool the buoyancy (it can't fly out of water).
+	var level := _ambient_level(cells, surf)   # -1 if no flanking pool found
+	var rho_sum := 0.0
+	var torque := 0.0
+	var fvel := Vector2.ZERO
+	var wet := 0
+	for cell in cells:
+		var x := int(cell.x)
+		var y := int(cell.y)
+		var s: float = level if level >= 0.0 else float(surf[x])
+		if float(y) >= s:                      # at/below the ambient liquid surface
+			var rf := _rho_near(x, y)
+			rho_sum += rf
+			torque += (x + 0.5 - b.pos.x) * (-g * rf)   # buoyancy (up) righting moment
+			fvel += _vel_at(x, y)
+			wet += 1
+	var mass := maxf(b.density * total, 1e-3)
+	var inertia := maxf(b.density * b.inertia_unit, 1e-2)
+	var force := Vector2(0.0, g * (b.density * total - rho_sum))   # weight - buoyancy
+	if wet > 0:
+		force += BODY_DRAG * (fvel / float(wet) - b.vel) * wet     # current coupling / drag
+	b.vel += force / mass * dt
+	b.omega += torque / inertia * dt
+	b.vel *= exp(-BODY_LIN_DAMP * dt)
+	b.omega *= exp(-BODY_ANG_DAMP * dt)
+	_move_body_collide(b, b.pos + b.vel * dt)
+	b.angle += b.omega * dt
+
+
+# Ambient pool surface (cell y) sampled from the free columns just left/right of
+# the body's span. Ignores any liquid trapped on the body itself. -1 = no pool
+# beside the body (e.g. body spans the container) -> caller falls back per-column.
+func _ambient_level(cells: PackedVector2Array, surf: PackedInt32Array) -> float:
+	var x0 := GRID_W
+	var x1 := -1
+	for cell in cells:
+		x0 = mini(x0, int(cell.x))
+		x1 = maxi(x1, int(cell.x))
+	var sum := 0.0
+	var n := 0
+	for d in range(1, 5):
+		var lx := x0 - d
+		if lx >= 0 and surf[lx] < GRID_H:
+			sum += surf[lx]; n += 1
+		var rx := x1 + d
+		if rx < GRID_W and surf[rx] < GRID_H:
+			sum += surf[rx]; n += 1
+	return (sum / n) if n > 0 else -1.0
+
+
+# Fluid density at the body cell's own depth (sample horizontally: the cell reads
+# as air, so look left/right for the surrounding liquid). Phase code -> density.
+func _rho_near(x: int, y: int) -> float:
+	for dx: int in [0, -1, 1, -2, 2]:
+		var nx: int = x + dx
+		if nx >= 0 and nx < GRID_W:
+			var a := int(_last_display[(nx + y * GRID_W) * 4 + 3])
+			if a >= 185:
+				return [1.0, 1.4, 2.0][clampi((a - 190) / 20, 0, 2)]
+	return 1.0
+
+
+func _vel_at(x: int, y: int) -> Vector2:
+	var i := (x + y * GRID_W) * 4
+	return Vector2(
+		(float(_last_display[i + 1]) / 255.0 - 0.5) * 120.0,
+		(float(_last_display[i + 2]) / 255.0 - 0.5) * 120.0)
+
+
+# Axis-separated move that stops against static solids (display code 85) and the
+# domain border. Body-body overlaps are resolved separately in _separate_bodies.
+func _move_body_collide(b: MovableSolid, newpos: Vector2) -> void:
+	if _body_blocked(b, Vector2(newpos.x, b.pos.y)):
+		b.vel.x = 0.0
+	else:
+		b.pos.x = newpos.x
+	if _body_blocked(b, Vector2(b.pos.x, newpos.y)):
+		b.vel.y = 0.0
+	else:
+		b.pos.y = newpos.y
+
+
+func _body_blocked(b: MovableSolid, at: Vector2) -> bool:
+	var R := b.bound_r
+	var ca := cos(b.angle)
+	var sa := sin(b.angle)
+	for y in range(int(floor(at.y - R)), int(ceil(at.y + R)) + 1):
+		for x in range(int(floor(at.x - R)), int(ceil(at.x + R)) + 1):
+			var wx := x + 0.5 - at.x
+			var wy := y + 0.5 - at.y
+			if b.contains_local(Vector2(wx * ca + wy * sa, -wx * sa + wy * ca)):
+				if x < 0 or x >= GRID_W or y < 0 or y >= GRID_H:
+					return true
+				if int(_last_display[(x + y * GRID_W) * 4 + 3]) == 85:
+					return true
+	return false
 
 
 func _add_brush_cells() -> void:
@@ -378,7 +792,22 @@ func _commit_stroke() -> void:
 		solver.commit_brush(mask, 0, 1, _pressure_strength, centroid, randi())
 	else:
 		solver.commit_brush(mask, _brush_material, 0, 0.0, centroid, randi())
+		# the air/gas brush also acts as the eraser for movable solids
+		if _brush_material == FlipFluidGPU.T_AIR:
+			_erase_solids_overlapping(_painted)
 	_painted.clear()
+
+
+# Remove any movable solid the (air-brush) stroke touched.
+func _erase_solids_overlapping(painted: Dictionary) -> void:
+	for i in range(_solids.size() - 1, -1, -1):
+		var b := _solids[i]
+		for cell in _body_cells(b, b.pos, b.angle):
+			if painted.has(Vector2i(int(cell.x), int(cell.y))):
+				if _grabbed == b:
+					_grabbed = null
+				_solids.remove_at(i)
+				break
 
 
 # -------------------------------------------------------------------- hud ----
@@ -387,17 +816,19 @@ func _update_hud() -> void:
 	var active := solver.active_particles()
 	var fps := Engine.get_frames_per_second()
 
-	var mat_txt: String = "Pressure 压力" if _pressure_mode else MAT_NAMES[_brush_material]
 	var cell_type: int = int(probe[0]) if probe.size() > 0 else 0
 	var is_water := probe.size() > 5 and probe[5] > 0.5
 	var rho: float = probe[6] if probe.size() > 6 else 0.0
 	var cell_txt: String = _liquid_name(rho) if is_water else MAT_NAMES[clampi(cell_type, 0, 3)]
 
+	var tool_txt := _tool_name()
+	var mode_txt: String = "DRAG 拖拽" if _drag_mode else "PAINT 绘制"
+
 	var lines := [
 		"fps: %d    frame dt: %.2f ms    sim step: %.2f ms" % [fps, _frame_dt * 1000.0, _last_step_us / 1000.0],
 		"phys substeps: %d/frame    phys_dt: %.4f s" % [SUBSTEPS, solver.phys_dt],
-		"particles: %d active / %d capacity" % [active, solver.capacity],
-		"brush: %s    radius: %.0f cells" % [mat_txt, _brush_radius],
+		"particles: %d active / %d capacity    solids: %d" % [active, solver.capacity, _solids.size()],
+		"mode: %s    brush: %s    radius: %.0f cells" % [mode_txt, tool_txt, _brush_radius],
 		"paused: %s" % ("YES" if _paused else "no"),
 		"p_atm: %.2f    jacobi iters: %d    gravity: %.0f    flip: %.2f" % [
 			solver.p_atm, solver.jacobi_iters, solver.gravity, solver.flip_ratio],
@@ -407,10 +838,19 @@ func _update_hud() -> void:
 		"  vel: (%.3f, %.3f)" % [probe[1] if probe.size() > 1 else 0.0, probe[2] if probe.size() > 2 else 0.0],
 		"  pressure: %.3f    particles: %.1f" % [probe[3] if probe.size() > 3 else 0.0, probe[4] if probe.size() > 4 else 0.0],
 		"",
-		"[1]vac [2]solid [3]water [4]air [5]lemon [6]honey [0]pressure  |  wheel=radius",
-		"[space]pause  [P]clear vel  [V]clear pressure  |  L-drag=paint",
+		"[1]vac [2]solid [3]water [4]air [5]lemon-juice [6]honey [0]pressure",
+		"[Q]lemon-chunk [W]ice-cube [9]draw-solid  |  [C]drag mode (wheel=rotate)",
+		"[space]pause  [P]clear vel  [V]clear pressure  |  wheel=radius",
 	]
 	_hud.text = "\n".join(lines)
+
+
+func _tool_name() -> String:
+	match _tool:
+		Tool.LEMON_CHUNK: return "Lemon chunk 柠檬块"
+		Tool.ICE_CHUNK:   return "Ice cube 冰块"
+		Tool.DRAW_SOLID:  return "Movable solid 可移动固体"
+		_: return "Pressure 压力" if _pressure_mode else MAT_NAMES[_brush_material]
 
 
 # Name a liquid cell by its density (matches the RHO constants in p2g.glsl).

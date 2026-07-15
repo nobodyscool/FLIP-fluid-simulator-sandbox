@@ -25,10 +25,20 @@ layout(set = 0, binding = 4,  std430) restrict buffer GridV  { float grid_v[]; }
 layout(set = 0, binding = 5,  std430) restrict buffer GridUO { float grid_u_old[]; };
 layout(set = 0, binding = 6,  std430) restrict buffer GridVO { float grid_v_old[]; };
 layout(set = 0, binding = 12, std430) restrict buffer CType  { int cell_type[]; };
+layout(set = 0, binding = 23, std430) restrict buffer SMask  { int solid_mask[]; };
+layout(set = 0, binding = 24, std430) restrict buffer SVel   { float solid_vel[]; };
 
 bool is_solid(int i, int j) {
 	if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny) return true;
-	return cell_type[i + j * pc.nx] == SOLID;
+	int c = i + j * pc.nx;
+	return cell_type[c] == SOLID || solid_mask[c] == 1;
+}
+// Wall velocity component at cell (i,j): the movable solid's velocity if any,
+// else 0 (static solid / border). axis 0 = x, 1 = y.
+float wall_vel(int i, int j, int axis) {
+	if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny) return 0.0;
+	int c = i + j * pc.nx;
+	return (solid_mask[c] == 1) ? solid_vel[2 * c + axis] : 0.0;
 }
 
 // Returns vec2(new_velocity, old_velocity) for the U component at pos.
@@ -88,11 +98,14 @@ void main() {
 	vec2 v_mid = vec2(sample_u_pair(mid).x, sample_v_pair(mid).x);
 	vec2 npos = clamp(pos + pc.phys_dt * v_mid, lo, hi);
 
-	// Separable solid collision: cancel the component that enters a solid cell.
+	// Separable solid collision: cancel the component that enters a solid cell and
+	// adopt the wall's velocity there (so a moving solid carries / pushes liquid).
 	float nxp = npos.x;
-	if (is_solid(int(floor(nxp)), int(floor(pos.y)))) { nxp = pos.x; v_new.x = 0.0; }
+	int sx = int(floor(nxp)), sy = int(floor(pos.y));
+	if (is_solid(sx, sy)) { nxp = pos.x; v_new.x = wall_vel(sx, sy, 0); }
 	float nyp = npos.y;
-	if (is_solid(int(floor(nxp)), int(floor(nyp)))) { nyp = pos.y; v_new.y = 0.0; }
+	int tx = int(floor(nxp)), ty = int(floor(nyp));
+	if (is_solid(tx, ty)) { nyp = pos.y; v_new.y = wall_vel(tx, ty, 1); }
 
 	particles[gid] = vec4(nxp, nyp, v_new.x, v_new.y);
 }

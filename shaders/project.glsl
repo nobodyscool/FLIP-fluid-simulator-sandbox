@@ -25,10 +25,12 @@ layout(set = 0, binding = 12, std430) restrict buffer CType { int cell_type[]; }
 layout(set = 0, binding = 13, std430) restrict buffer Fluid { int fluid_mask[]; };
 layout(set = 0, binding = 14, std430) restrict buffer PA    { float p_a[]; };
 layout(set = 0, binding = 22, std430) restrict buffer RhoCell { float rho_cell[]; };
+layout(set = 0, binding = 23, std430) restrict buffer SMask   { int solid_mask[]; };
 
 bool solid(int i, int j) {
 	if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny) return true;
-	return cell_type[i + j * pc.nx] == SOLID;
+	int c = i + j * pc.nx;
+	return cell_type[c] == SOLID || solid_mask[c] == 1;
 }
 float pressure_of(int i, int j) {
 	int c = i + j * pc.nx;

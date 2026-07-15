@@ -1,17 +1,15 @@
 [gd_scene format=3 uid="uid://20cid13vvjrm"]
 
 [ext_resource type="Script" uid="uid://cw1hfyds4vbdm" path="res://scripts/main.gd" id="1_main"]
-[ext_resource type="Texture2D" uid="uid://c40cihuijvygn" path="res://assets/sprites/bg-1280x720.png" id="2_0wfyh"]
 
 [node name="Main" type="Node2D" unique_id=1527691939]
 visible = false
 script = ExtResource("1_main")
 flip_ratio = 0.92
-background = ExtResource("2_0wfyh")
 water_color = Color(0.09149521, 0.36853132, 0.7644422, 1)
 water_opacity = 0.8
 gas_edge_white = 0.4
-liquid_edge_white = 0.15
+liquid_edge_white = 0.2
 foam_edge_base = 0.5
 
 [node name="HUD" type="CanvasLayer" parent="." unique_id=1659695597]

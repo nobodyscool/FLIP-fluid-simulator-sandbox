@@ -23,7 +23,10 @@ Window size: 1600×1200.
 | `1` `2` `3` `4` | Switch brush to Vacuum / Solid / Water / Air |
 | `5` `6` | Switch brush to Lemon Juice / Honey (denser than water, layers automatically) |
 | `0` | Pressure impulse brush (applies a radial velocity impulse to the painted area) |
-| Mouse wheel | Increase/decrease brush radius (in grid units, shown as a ring) |
+| `Q` `W` | Movable-solid brush: Lemon chunk / Ice cube — left-click to drop one in |
+| `9` | Draw a movable solid (drag to draw a shape, e.g. a bottle); shown brown |
+| `C` | Toggle DRAG mode: left-drag to move a movable solid, mouse wheel to rotate it |
+| Mouse wheel | Increase/decrease brush radius (or rotate the grabbed solid in DRAG mode) |
 | `P` | Clear the velocity field (water stops instantly) |
 | `V` | Clear the pressure field |
 
@@ -32,10 +35,14 @@ and automatically stratify (denser fluids sink) via variable-density pressure pr
 cell is colored by its dominant phase (blue/green/yellow). See `docs/DESIGN.md` §6.5 for
 implementation details.
 
-On startup, a container plus a water/lemon-juice/honey stratification demo is preloaded
-(`TEST_MULTIPHASE` in `main.gd`; set it to `false` to revert to a single dam-break block).
-You can also paint your own solid container and use `3/5/6` to draw different liquids and
-observe stratification.
+**Movable solids**: Draw a container/bottle (`9`) or drop lemon chunks (`Q`) and ice cubes (`W`)
+into the liquid. Kinematic bodies (a bottle, or anything grabbed in `C` drag mode) push and slosh
+the liquid and pour it out when tilted; dynamic bodies float or sink by density (ice floats, the
+lemon chunk sinks). See `docs/DESIGN.md` §6.6.
+
+On startup a demo is preloaded (`TEST_SOLIDS` in `main.gd`: a water pool with a floating ice cube,
+a sinking lemon chunk, and a sloshing bar). Set `TEST_SOLIDS`/`TEST_MULTIPHASE` to `false` for a
+plain dam-break start.
 
 ## Documentation
 

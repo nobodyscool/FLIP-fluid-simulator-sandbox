@@ -47,11 +47,11 @@ var _shader_bindings := {
 	"clear_grid":      [7, 8, 9, 10, 11, 13, 21],
 	"p2g":             [0, 7, 8, 9, 10, 11, 20, 21],
 	"normalize":       [3, 4, 5, 6, 7, 8, 9, 10],
-	"enforce_solids":  [3, 4, 12],
-	"cell_setup":      [3, 4, 11, 12, 13, 16, 21, 22],
-	"jacobi":          [12, 13, 14, 15, 16, 22],
-	"project":         [3, 4, 12, 13, 14, 22],
-	"g2p_advect":      [0, 3, 4, 5, 6, 12],
+	"enforce_solids":  [3, 4, 12, 23, 24],
+	"cell_setup":      [3, 4, 11, 12, 13, 16, 21, 22, 23],
+	"jacobi":          [12, 13, 14, 15, 16, 22, 23],
+	"project":         [3, 4, 12, 13, 14, 22, 23],
+	"g2p_advect":      [0, 3, 4, 5, 6, 12, 23, 24],
 	"drain":           [0, 1, 2, 12],
 	"emit":            [0, 1, 2, 12, 19, 20],
 	"free_particles":  [0, 1, 2, 19],
@@ -119,6 +119,8 @@ func _create_buffers() -> void:
 	_buf[20] = _new_buf(capacity * 4)           # phase (per-particle liquid id)
 	_buf[21] = _new_buf(cell_count * 3 * 4)     # phase_count (3 per-cell counts)
 	_buf[22] = _new_buf(cell_count * 4)         # rho_cell (per-cell density, float)
+	_buf[23] = _new_buf(cell_count * 4)         # solid_mask (movable solid this frame)
+	_buf[24] = _new_buf(cell_count * 2 * 4)     # solid_vel (movable solid velocity, vec2)
 
 
 func _new_buf(size_bytes: int) -> RID:
@@ -275,6 +277,13 @@ func commit_brush(mask: PackedByteArray, material: int, mode: int, value: float,
 	rd.compute_list_end()
 	rd.submit()
 	rd.sync()
+
+
+# Upload this frame's movable-solid rasterisation (mask + per-cell velocity).
+# mask: int[cell_count] (1 = movable solid); vel: float[cell_count*2] (vx,vy).
+func upload_solids(mask: PackedByteArray, vel: PackedByteArray) -> void:
+	rd.buffer_update(_buf[23], 0, mask.size(), mask)
+	rd.buffer_update(_buf[24], 0, vel.size(), vel)
 
 
 func clear_velocity() -> void:

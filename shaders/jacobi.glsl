@@ -31,6 +31,7 @@ layout(set = 0, binding = 14, std430) restrict buffer PA    { float p_a[]; };
 layout(set = 0, binding = 15, std430) restrict buffer PB    { float p_b[]; };
 layout(set = 0, binding = 16, std430) restrict buffer Div   { float divergence[]; };
 layout(set = 0, binding = 22, std430) restrict buffer RhoCell { float rho_cell[]; };
+layout(set = 0, binding = 23, std430) restrict buffer SMask   { int solid_mask[]; };
 
 // Accumulate one neighbour's contribution, weighted by 1/rho_face.
 //   sum   += w * p_neighbour   (w = 1/rho_face)
@@ -38,7 +39,7 @@ layout(set = 0, binding = 22, std430) restrict buffer RhoCell { float rho_cell[]
 void neighbour(int ni, int nj, float rho_c, inout float sum, inout float denom) {
 	if (ni < 0 || ni >= pc.nx || nj < 0 || nj >= pc.ny) return; // border = solid, drop
 	int nc = ni + nj * pc.nx;
-	if (cell_type[nc] == SOLID) return;                         // solid, drop
+	if (cell_type[nc] == SOLID || solid_mask[nc] == 1) return;  // solid (static or movable), drop
 	bool nf = fluid_mask[nc] == 1;
 	float rho_face = nf ? (0.5 * (rho_c + rho_cell[nc])) : rho_c; // empty -> liquid's own rho
 	float w = 1.0 / rho_face;
