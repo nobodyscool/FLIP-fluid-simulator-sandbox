@@ -53,3 +53,10 @@ jacobi_iters / emit_ppc）与 `main.gd` 的 `SUBSTEPS`，运行时 HUD 全量显
 
 单帧仿真 ≈ 2.2–2.6 ms（4 子步 × 60 Jacobi + 100 万粒子池），关 vsync 整帧 ≈ 220–250 fps，
 远超实时。详见 `docs/SELFTEST.md`。
+
+## 许可证
+
+Copyright (C) 2026 nobodyscool
+
+本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证（GPL）第 3 版或（由你选择）
+任何更新版本的条款，重新分发和/或修改本程序。完整文本见 [LICENSE](LICENSE)。

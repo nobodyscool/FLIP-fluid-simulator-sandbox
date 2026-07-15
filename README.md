@@ -61,3 +61,11 @@ in the runtime HUD.
 
 Simulation time per frame ≈ 2.2–2.6 ms (4 substeps × 60 Jacobi iterations + 1M particle pool),
 ≈ 220–250 fps with vsync off — well above real-time. See `docs/SELFTEST.md` for details.
+
+## License
+
+Copyright (C) 2026 nobodyscool
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version. See [LICENSE](LICENSE) for the full text.
