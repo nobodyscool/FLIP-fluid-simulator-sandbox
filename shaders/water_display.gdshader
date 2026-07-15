@@ -37,8 +37,21 @@ uniform float foam_speed_gain : hint_range(0.0, 6.0) = 3.5;   // flow speed -> w
 uniform float foam_edge_base : hint_range(0.0, 1.0) = 0.10;   // base foam on calm thin surface
 uniform float foam_depth : hint_range(0.05, 1.0) = 0.45;      // fullness above which foam is suppressed (deep = no foam)
 
+// interface edges (thin 1-cell band, still ONE colour per cell):
+//   gas-liquid  face -> lighten toward white (sea-foam highlight)
+//   liquid-liquid face (different phase) -> lighten toward white (soft seam)
+uniform bool  enable_edge = true;
+uniform float gas_edge_white : hint_range(0.0, 1.0) = 0.35;
+uniform float liquid_edge_white : hint_range(0.0, 1.0) = 0.35;
+
 vec3 sample_bg(vec2 uv) {
 	return has_bg ? texture(bg_tex, clamp(uv, 0.0, 1.0)).rgb : bg_color.rgb;
+}
+
+// A-channel code of the cell one texel away (nearest -> lands squarely in the
+// neighbour cell, so the classification is identical across the whole block).
+int base_at(vec2 uv, vec2 off) {
+	return int(texture(fluid_nearest, uv + off).a * 255.0 + 0.5);
 }
 
 // Dominant-phase code (A = 190/210/230) -> that liquid's tint. ONE colour/cell.
@@ -84,6 +97,24 @@ void fragment() {
 			float thin = 1.0 - smoothstep(0.0, foam_depth, dens);   // 1 at thin/spray, 0 at/above foam_depth
 			float foam = clamp((foam_edge_base + speed * foam_speed_gain) * thin * foam_amount, 0.0, 1.0);
 			fg = mix(fg, foam_color.rgb, foam);
+		}
+
+		// Interface edges: check the 4 neighbour cells (still one colour per cell).
+		if (enable_edge) {
+			vec2 texel = 1.0 / vec2(textureSize(fluid_nearest, 0));
+			int myph = (base - 190) / 20;
+			int nbs[4] = int[](
+				base_at(uv, vec2(-texel.x, 0.0)), base_at(uv, vec2(texel.x, 0.0)),
+				base_at(uv, vec2(0.0, -texel.y)), base_at(uv, vec2(0.0, texel.y)));
+			bool gas_nb = false;       // neighbour is air/background -> free surface
+			bool diff_liquid_nb = false; // neighbour is a different liquid -> layer seam
+			for (int k = 0; k < 4; k++) {
+				int nb = nbs[k];
+				if (nb < 40) gas_nb = true;
+				else if (nb >= 185 && ((nb - 190) / 20) != myph) diff_liquid_nb = true;
+			}
+			if (gas_nb) fg = mix(fg, vec3(1.0), gas_edge_white);
+			if (diff_liquid_nb) fg = mix(fg, vec3(1.0), liquid_edge_white);
 		}
 
 		// Transparent per-cell foreground over the smooth refracted background.

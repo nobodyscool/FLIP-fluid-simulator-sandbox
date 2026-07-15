@@ -47,6 +47,14 @@ const PRESSURE_PREVIEW := Color(0.95, 0.75, 0.1, 0.6)
 @export var lemon_color: Color = Color(0.55, 0.85, 0.30)   # 柠檬汁：泛绿，密度>水
 @export var honey_color: Color = Color(0.95, 0.78, 0.18)   # 蜂蜜：泛黄，密度>柠檬汁>水
 
+@export_group("Interface Edges 交界描边")
+# 交界描边总开关：给液体与气/其它液体相邻的那一圈 cell 叠色（仍一格一色，1 格宽）。
+@export var enable_edge: bool = true
+# 气液面（液体紧邻空气/背景）叠白量：越大液面泛白越明显（海浪/泡沫感）。
+@export_range(0.0, 1.0, 0.01) var gas_edge_white: float = 0.35
+# 液液面（紧邻不同液体）叠白量：越大分层交界的白边越亮（柔和过渡缝）。
+@export_range(0.0, 1.0, 0.01) var liquid_edge_white: float = 0.35
+
 @export_group("Foam 泡沫泛白")
 # 总开关：泡沫（水色蓝→白）。关掉则水面纯蓝，无泛白。
 @export var enable_foam: bool = true
@@ -165,6 +173,9 @@ func _apply_render_params() -> void:
 	_mat.set_shader_parameter("water_tint", water_color)
 	_mat.set_shader_parameter("lemon_color", lemon_color)
 	_mat.set_shader_parameter("honey_color", honey_color)
+	_mat.set_shader_parameter("enable_edge", enable_edge)
+	_mat.set_shader_parameter("gas_edge_white", gas_edge_white)
+	_mat.set_shader_parameter("liquid_edge_white", liquid_edge_white)
 	_mat.set_shader_parameter("water_opacity", water_opacity)
 	_mat.set_shader_parameter("refraction", refraction)
 	_mat.set_shader_parameter("smooth_water", smooth_water)
