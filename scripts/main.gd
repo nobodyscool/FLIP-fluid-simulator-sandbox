@@ -356,7 +356,7 @@ func _update_overlay() -> void:
 		var ghost: MovableSolid = _preview_ice if _tool == Tool.ICE_CHUNK else _preview_lemon
 		ghost.pos = _mouse_grid()
 		var gcol := Color(ghost.color, 0.55)
-		for cell in _body_cells(ghost, ghost.pos, 0.0):
+		for cell in _cells(ghost):
 			_set_px(int(cell.x), int(cell.y), gcol)
 
 	# movable solids drawn opaque on top (they occlude the liquid behind them)
@@ -493,12 +493,12 @@ func _create_or_merge_drawn(new_cells: Array) -> void:
 	for b in _solids:
 		if b.kind != MovableSolid.Kind.DRAW:
 			continue
-		for cell in _body_cells(b, b.pos, b.angle):
+		for cell in _cells(b):
 			if _cell_touches(Vector2i(int(cell.x), int(cell.y)), cells):
 				merged.append(b)
 				break
 	for b in merged:
-		for cell in _body_cells(b, b.pos, b.angle):
+		for cell in _cells(b):
 			cells[Vector2i(int(cell.x), int(cell.y))] = true
 		if _grabbed == b:
 			_grabbed = null
@@ -525,9 +525,22 @@ func _body_at(gp: Vector2) -> MovableSolid:
 
 # --- movable solid rasterisation / dynamics ------------------------------------
 
+# Cells a body occupies at its CURRENT pose, cached per (pos, angle). Every
+# per-frame pass (buoyancy / separation / rasterise / overlay) shares this, so
+# the AABB scan runs at most once per body per pose instead of ~5-7x/frame.
+func _cells(b: MovableSolid) -> PackedVector2Array:
+	if b.cache_valid and b.cache_pos == b.pos and b.cache_angle == b.angle:
+		return b.cache_cells
+	b.cache_cells = _scan_cells(b, b.pos, b.angle)
+	b.cache_pos = b.pos
+	b.cache_angle = b.angle
+	b.cache_valid = true
+	return b.cache_cells
+
+
 # Cells covered by a body at the given pose (inverse mapping -> no holes),
 # clamped to the domain. Returns Vector2(x, y) integer cell coords.
-func _body_cells(b: MovableSolid, at: Vector2, ang: float) -> PackedVector2Array:
+func _scan_cells(b: MovableSolid, at: Vector2, ang: float) -> PackedVector2Array:
 	var out := PackedVector2Array()
 	var R := b.bound_r
 	var ca := cos(ang)
@@ -558,7 +571,7 @@ func _rasterize_and_upload(delta: float) -> void:
 	_solid_mask.fill(0)
 	_solid_vel.fill(0)
 	for b in _solids:
-		for cell in _body_cells(b, b.pos, b.angle):
+		for cell in _cells(b):
 			var x := int(cell.x)
 			var y := int(cell.y)
 			var c := x + y * GRID_W
@@ -571,7 +584,7 @@ func _rasterize_and_upload(delta: float) -> void:
 
 
 func _draw_solid_overlay(b: MovableSolid) -> void:
-	for cell in _body_cells(b, b.pos, b.angle):
+	for cell in _cells(b):
 		_set_px(int(cell.x), int(cell.y), b.color)
 
 
@@ -581,16 +594,17 @@ func _update_solid_dynamics(delta: float) -> void:
 	if _last_display.is_empty():
 		return
 	var dt := clampf(delta, 1e-4, 0.05)
-	# per-column topmost liquid cell (surface height); GRID_H = dry column
+	# per-column topmost liquid cell (surface height); GRID_H = dry column.
+	# Scan each column top-down and break at the first liquid cell.
 	var surf := PackedInt32Array()
 	surf.resize(GRID_W)
 	for x in range(GRID_W):
-		surf[x] = GRID_H
-	for y in range(GRID_H):
-		var row := y * GRID_W
-		for x in range(GRID_W):
-			if _last_display[(row + x) * 4 + 3] >= 185 and y < surf[x]:
-				surf[x] = y
+		var sy := GRID_H
+		for y in range(GRID_H):
+			if _last_display[(x + y * GRID_W) * 4 + 3] >= 185:
+				sy = y
+				break
+		surf[x] = sy
 	for b in _solids:
 		if b.dynamic and b != _grabbed:
 			_integrate_body(b, dt, surf)
@@ -605,21 +619,20 @@ func _separate_bodies() -> void:
 	if n < 2:
 		return
 	for _iter in range(2):
-		var sets: Array[Dictionary] = []
-		for b in _solids:
-			var d := {}
-			for cell in _body_cells(b, b.pos, b.angle):
-				d[Vector2i(int(cell.x), int(cell.y))] = true
-			sets.append(d)
 		for i in range(n):
+			var a: MovableSolid = _solids[i]
+			var a_move := a.dynamic and a != _grabbed
 			for j in range(i + 1, n):
-				var a: MovableSolid = _solids[i]
 				var bb: MovableSolid = _solids[j]
-				var a_move := a.dynamic and a != _grabbed
 				var b_move := bb.dynamic and bb != _grabbed
 				if not a_move and not b_move:
 					continue
-				var ov := _overlap_count(sets[i], sets[j])
+				# broad-phase: bounding-circle reject (cheap, avoids the O(N^2) cell work)
+				var rr := a.bound_r + bb.bound_r
+				if a.pos.distance_squared_to(bb.pos) > rr * rr:
+					continue
+				# narrow-phase: count a's cells that lie inside b (no set allocation)
+				var ov := _overlap_direct(a, bb)
 				if ov <= 0:
 					continue
 				var dir := bb.pos - a.pos
@@ -634,12 +647,16 @@ func _separate_bodies() -> void:
 					_push_body(bb, dir, push)
 
 
-func _overlap_count(sa: Dictionary, sb: Dictionary) -> int:
-	var small := sa if sa.size() <= sb.size() else sb
-	var big := sb if sa.size() <= sb.size() else sa
+# Number of body a's cells that fall inside body b (tests a's cached cells
+# against b's shape directly -> no Dictionary allocation).
+func _overlap_direct(a: MovableSolid, b: MovableSolid) -> int:
+	var ca := cos(b.angle)
+	var sa := sin(b.angle)
 	var c := 0
-	for k in small:
-		if big.has(k):
+	for cell in _cells(a):
+		var wx := cell.x + 0.5 - b.pos.x
+		var wy := cell.y + 0.5 - b.pos.y
+		if b.contains_local(Vector2(wx * ca + wy * sa, -wx * sa + wy * ca)):
 			c += 1
 	return c
 
@@ -655,32 +672,34 @@ func _push_body(b: MovableSolid, dir: Vector2, dist: float) -> void:
 
 func _integrate_body(b: MovableSolid, dt: float, surf: PackedInt32Array) -> void:
 	var g := solver.gravity
-	var cells := _body_cells(b, b.pos, b.angle)
+	var cells := _cells(b)
 	var total := cells.size()
 	if total == 0:
 		return
 	# Ambient pool surface measured from the FREE columns beside the body, so water
 	# trapped on a flat top does not fool the buoyancy (it can't fly out of water).
 	var level := _ambient_level(cells, surf)   # -1 if no flanking pool found
-	var rho_sum := 0.0
-	var torque := 0.0
-	var fvel := Vector2.ZERO
-	var wet := 0
+	# Submersion is pure arithmetic (no per-cell fluid reads): count submerged cells
+	# and their x-moment for the righting torque. Density/velocity are sampled ONCE
+	# per body (at its centre depth) -- ample for a toy, and far cheaper per frame.
+	var submerged := 0
+	var sum_rx := 0.0
 	for cell in cells:
-		var x := int(cell.x)
-		var y := int(cell.y)
-		var s: float = level if level >= 0.0 else float(surf[x])
-		if float(y) >= s:                      # at/below the ambient liquid surface
-			var rf := _rho_near(x, y)
-			rho_sum += rf
-			torque += (x + 0.5 - b.pos.x) * (-g * rf)   # buoyancy (up) righting moment
-			fvel += _vel_at(x, y)
-			wet += 1
+		var s: float = level if level >= 0.0 else float(surf[int(cell.x)])
+		if cell.y >= s:
+			submerged += 1
+			sum_rx += cell.x + 0.5 - b.pos.x
 	var mass := maxf(b.density * total, 1e-3)
 	var inertia := maxf(b.density * b.inertia_unit, 1e-2)
-	var force := Vector2(0.0, g * (b.density * total - rho_sum))   # weight - buoyancy
-	if wet > 0:
-		force += BODY_DRAG * (fvel / float(wet) - b.vel) * wet     # current coupling / drag
+	var force := Vector2(0.0, g * b.density * total)     # weight (down)
+	var torque := 0.0
+	if submerged > 0:
+		var cx := clampi(int(b.pos.x), 0, GRID_W - 1)
+		var cy := clampi(int(b.pos.y), 0, GRID_H - 1)
+		var rho_f := _rho_near(cx, cy)
+		force.y -= g * rho_f * submerged                 # buoyancy (up)
+		torque = -g * rho_f * sum_rx                      # righting moment
+		force += BODY_DRAG * (_vel_at(cx, cy) - b.vel) * submerged   # drag / current
 	b.vel += force / mass * dt
 	b.omega += torque / inertia * dt
 	b.vel *= exp(-BODY_LIN_DAMP * dt)
@@ -742,19 +761,18 @@ func _move_body_collide(b: MovableSolid, newpos: Vector2) -> void:
 		b.pos.y = newpos.y
 
 
+# Would the body (at candidate pose `at`, a pure translation of its current pose)
+# hit a static solid or the border? Reuses the cached cells shifted by the
+# translation instead of re-scanning the AABB (callers only ever translate).
 func _body_blocked(b: MovableSolid, at: Vector2) -> bool:
-	var R := b.bound_r
-	var ca := cos(b.angle)
-	var sa := sin(b.angle)
-	for y in range(int(floor(at.y - R)), int(ceil(at.y + R)) + 1):
-		for x in range(int(floor(at.x - R)), int(ceil(at.x + R)) + 1):
-			var wx := x + 0.5 - at.x
-			var wy := y + 0.5 - at.y
-			if b.contains_local(Vector2(wx * ca + wy * sa, -wx * sa + wy * ca)):
-				if x < 0 or x >= GRID_W or y < 0 or y >= GRID_H:
-					return true
-				if int(_last_display[(x + y * GRID_W) * 4 + 3]) == 85:
-					return true
+	var off := at - b.pos
+	for cell in _cells(b):
+		var nx := int(floor(cell.x + 0.5 + off.x))
+		var ny := int(floor(cell.y + 0.5 + off.y))
+		if nx < 0 or nx >= GRID_W or ny < 0 or ny >= GRID_H:
+			return true
+		if int(_last_display[(nx + ny * GRID_W) * 4 + 3]) == 85:
+			return true
 	return false
 
 
@@ -802,7 +820,7 @@ func _commit_stroke() -> void:
 func _erase_solids_overlapping(painted: Dictionary) -> void:
 	for i in range(_solids.size() - 1, -1, -1):
 		var b := _solids[i]
-		for cell in _body_cells(b, b.pos, b.angle):
+		for cell in _cells(b):
 			if painted.has(Vector2i(int(cell.x), int(cell.y))):
 				if _grabbed == b:
 					_grabbed = null

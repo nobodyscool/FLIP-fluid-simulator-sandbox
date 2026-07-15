@@ -24,6 +24,13 @@ var density: float = 1.0         # for buoyancy (vs surrounding rho_cell)
 var prev_pos: Vector2 = Vector2.ZERO
 var prev_angle: float = 0.0
 
+# per-pose occupied-cell cache (filled by main.gd._cells; auto-invalidated when
+# pos/angle change so the AABB scan runs at most once per body per pose).
+var cache_cells: PackedVector2Array = PackedVector2Array()
+var cache_pos: Vector2 = Vector2.ZERO
+var cache_angle: float = 0.0
+var cache_valid: bool = false
+
 # shape params (in cells)
 var half_ext: Vector2 = Vector2(4.0, 4.0)   # SQUARE
 var radius: float = 6.0                      # HALFDISK
