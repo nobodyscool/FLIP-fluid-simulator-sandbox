@@ -26,7 +26,7 @@ const MAT_PREVIEW := [
 const PRESSURE_PREVIEW := Color(0.95, 0.75, 0.1, 0.6)
 
 # --- movable solids (bottle / lemon chunk / ice cube) ---
-enum Tool { MATERIAL, LEMON_CHUNK, ICE_CHUNK, DRAW_SOLID }
+enum Tool { MATERIAL, LEMON_CHUNK, ICE_CHUNK, DRAW_SOLID, BUBBLE }
 const SOLID_BROWN := Color(0.5, 0.32, 0.15)          # drawn movable solid (bottle)
 const LEMON_CHUNK_COLOR := Color(0.80, 0.83, 0.22)   # lemon chunk (yellow-green)
 const ICE_COLOR := Color(0.75, 0.88, 0.96)           # ice cube (pale cyan)
@@ -86,6 +86,19 @@ const ROT_STEP := 0.15       # radians per wheel notch in drag mode
 # 深水截止：cell 充盈度(密度)≥此值就完全不泛白（即使流速很快）。越小=越"挑"，只有很薄的水/水珠才泛白。
 @export_range(0.05, 1.0, 0.01) var foam_depth: float = 0.2
 
+@export_group("Bubbles 气泡")
+# 按 E 切到气泡画笔：在液体处按住左键拖动=添加气泡源，反复涂抹叠加强度（冒泡更密）。
+# 气泡从源处不断上浮、摆动，触到液面即消失。画在液体底部就是“从最底层往上冒”。气体(4)画笔可擦除气泡源。
+@export var bubble_color: Color = Color(0.85, 0.95, 1.0, 0.9)      # 气泡颜色（浅青白，带透明）
+@export_range(1.0, 40.0, 1.0) var bubble_rise: float = 16.0        # 上浮速度（格/秒）
+@export_range(0.0, 3.0, 0.1) var bubble_wobble_amp: float = 0.8    # 左右摆动幅度（格）
+@export_range(0.0, 20.0, 0.5) var bubble_wobble_freq: float = 7.0  # 摆动频率（弧度/秒）
+@export_range(0.1, 10.0, 0.1) var bubble_spawn_rate: float = 2.5   # 生成率（越大冒泡越快）
+@export_range(0.1, 10.0, 0.1) var bubble_paint_rate: float = 3.0   # 按住画笔时源强度增长速度
+@export_range(0.5, 10.0, 0.5) var bubble_src_max: float = 4.0      # 单格源强度上限
+@export_range(0.0, 2.0, 0.05) var bubble_decay: float = 0.01        # 源强度自然衰减（/秒，0=不衰减）
+@export var bubble_max: int = 700                                  # 同时存在的气泡数上限
+
 var solver: FlipFluidGPU
 var _fluid_tex: ImageTexture
 var _overlay_tex: ImageTexture
@@ -117,6 +130,11 @@ var _last_display := PackedByteArray() # previous frame's display, for buoyancy
 var _preview_lemon: MovableSolid       # ghost outline at the cursor for Q/W tools
 var _preview_ice: MovableSolid
 
+# bubble effect (CPU overlay particles: rise through the liquid, pop at the surface)
+var _bubble_src := PackedFloat32Array()   # per-cell source strength (E-brush accumulates)
+var _bubble_src_cells := {}               # Vector2i -> true, active (non-zero) source cells
+var _bubbles: Array = []                  # each: PackedFloat32Array[base_x, y, rise_mul, phase, amp]
+
 # HUD timing
 var _frame_dt := 0.0
 
@@ -142,6 +160,7 @@ func _ready() -> void:
 
 	_solid_mask.resize(GRID_W * GRID_H * 4)       # int per cell
 	_solid_vel.resize(GRID_W * GRID_H * 2 * 4)    # vec2 per cell
+	_bubble_src.resize(GRID_W * GRID_H)           # float per cell (bubble source field)
 	_preview_lemon = MovableSolid.make_halfdisk(Vector2.ZERO, LEMON_R, LEMON_CHUNK_COLOR, LEMON_DENSITY, true)
 	_preview_ice = MovableSolid.make_square(Vector2.ZERO, ICE_HALF, ICE_COLOR, ICE_DENSITY, true)
 
@@ -327,6 +346,7 @@ func _process(delta: float) -> void:
 
 	# upload the fluid DATA texture (shader composites it over the background)
 	_last_display = solver.read_display()
+	_update_bubbles(delta)   # spawn/rise/pop bubbles against this frame's display
 	_fluid_tex.update(Image.create_from_data(GRID_W, GRID_H, false, Image.FORMAT_RGBA8, _last_display))
 	_update_overlay()
 	_apply_render_params()
@@ -344,6 +364,8 @@ func _update_overlay() -> void:
 		var col: Color
 		if _tool == Tool.DRAW_SOLID:
 			col = Color(SOLID_BROWN, 0.7)          # drawing a movable solid -> brown
+		elif _tool == Tool.BUBBLE:
+			col = Color(bubble_color.r, bubble_color.g, bubble_color.b, 0.4)  # bubble source
 		elif _pressure_mode:
 			col = PRESSURE_PREVIEW
 		else:
@@ -362,6 +384,10 @@ func _update_overlay() -> void:
 	# movable solids drawn opaque on top (they occlude the liquid behind them)
 	for b in _solids:
 		_draw_solid_overlay(b)
+
+	# rising bubbles: light specks inside the liquid
+	for b in _bubbles:
+		_set_px(int(b[0] + sin(b[3]) * b[4]), int(b[1]), bubble_color)
 
 	var cursor: Color = PRESSURE_PREVIEW if _pressure_mode else Color(1, 1, 1, 0.85)
 	var r := _brush_radius
@@ -430,6 +456,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_Q: _tool = Tool.LEMON_CHUNK; _drag_mode = false
 			KEY_W: _tool = Tool.ICE_CHUNK; _drag_mode = false
 			KEY_9: _tool = Tool.DRAW_SOLID; _drag_mode = false
+			KEY_E: _tool = Tool.BUBBLE; _drag_mode = false; _pressure_mode = false
 			KEY_C: _drag_mode = not _drag_mode; _grabbed = null; _dragging = false
 			KEY_P: solver.clear_velocity()
 			KEY_V: solver.clear_pressure()
@@ -477,6 +504,10 @@ func _on_left_release() -> void:
 		_dragging = false
 		if _painted.size() >= 2:
 			_create_or_merge_drawn(_painted.keys())
+		_painted.clear()
+	elif _tool == Tool.BUBBLE:
+		# bubble sources were accumulated during the drag; nothing to commit to the solver
+		_dragging = false
 		_painted.clear()
 	else:
 		_commit_stroke()
@@ -810,9 +841,10 @@ func _commit_stroke() -> void:
 		solver.commit_brush(mask, 0, 1, _pressure_strength, centroid, randi())
 	else:
 		solver.commit_brush(mask, _brush_material, 0, 0.0, centroid, randi())
-		# the air/gas brush also acts as the eraser for movable solids
+		# the air/gas brush also acts as the eraser for movable solids and bubble sources
 		if _brush_material == FlipFluidGPU.T_AIR:
 			_erase_solids_overlapping(_painted)
+			_erase_bubbles_overlapping(_painted)
 	_painted.clear()
 
 
@@ -826,6 +858,71 @@ func _erase_solids_overlapping(painted: Dictionary) -> void:
 					_grabbed = null
 				_solids.remove_at(i)
 				break
+
+
+# ------------------------------------------------------------- bubbles ----
+# Is display cell (x, y) liquid? (fluid A code >= 185; solid/air/vacuum are below.)
+func _is_fluid_cell(x: int, y: int) -> bool:
+	if x < 0 or x >= GRID_W or y < 0 or y >= GRID_H:
+		return false
+	return _last_display[(x + y * GRID_W) * 4 + 3] >= 185
+
+
+# CPU overlay bubbles: the E-brush paints a per-cell source field (held strokes stack
+# into more intensity); each frame we spawn bubbles from source cells that sit in liquid,
+# rise + wobble them, and pop them the instant they leave the liquid (reach the surface).
+func _update_bubbles(delta: float) -> void:
+	var dt := clampf(delta, 1e-4, 0.05)
+	# accumulate source strength while dragging the bubble brush (hold to intensify)
+	if _dragging and _tool == Tool.BUBBLE:
+		for cell in _painted:
+			var c: int = cell.x + cell.y * GRID_W
+			_bubble_src[c] = minf(_bubble_src[c] + bubble_paint_rate * dt, bubble_src_max)
+			_bubble_src_cells[cell] = true
+	if _paused or _last_display.is_empty():
+		return
+	# spawn from active source cells that are currently inside liquid
+	var dead: Array = []
+	for cell in _bubble_src_cells:
+		var c: int = cell.x + cell.y * GRID_W
+		var s: float = _bubble_src[c]
+		if bubble_decay > 0.0:
+			s = maxf(0.0, s - bubble_decay * dt)
+			_bubble_src[c] = s
+		if s <= 0.0:
+			dead.append(cell)
+			continue
+		if _bubbles.size() < bubble_max and _is_fluid_cell(cell.x, cell.y):
+			if randf() < s * bubble_spawn_rate * dt:
+				_spawn_bubble(cell.x, cell.y)
+	for cell in dead:
+		_bubble_src_cells.erase(cell)
+	# rise + wobble; pop when a bubble leaves the liquid (reaches the surface / an object)
+	var survivors: Array = []
+	for b in _bubbles:
+		b[1] -= bubble_rise * b[2] * dt
+		b[3] += bubble_wobble_freq * dt
+		var cx: int = clampi(int(b[0] + sin(b[3]) * b[4]), 0, GRID_W - 1)
+		var cy: int = int(b[1])
+		if cy >= 0 and _is_fluid_cell(cx, cy):
+			survivors.append(b)
+	_bubbles = survivors
+
+
+func _spawn_bubble(gx: int, gy: int) -> void:
+	_bubbles.append(PackedFloat32Array([
+		float(gx) + randf(),                            # 0: base x (wobble centre)
+		float(gy) + randf(),                            # 1: y (rises = decreases)
+		randf_range(0.7, 1.3),                          # 2: rise-speed multiplier
+		randf() * TAU,                                  # 3: wobble phase
+		randf_range(0.4, 1.0) * bubble_wobble_amp]))    # 4: wobble amplitude (cells)
+
+
+# The air-brush eraser also clears bubble sources it touches.
+func _erase_bubbles_overlapping(painted: Dictionary) -> void:
+	for cell in painted:
+		_bubble_src[cell.x + cell.y * GRID_W] = 0.0
+		_bubble_src_cells.erase(cell)
 
 
 # -------------------------------------------------------------------- hud ----
@@ -857,7 +954,7 @@ func _update_hud() -> void:
 		"  pressure: %.3f    particles: %.1f" % [probe[3] if probe.size() > 3 else 0.0, probe[4] if probe.size() > 4 else 0.0],
 		"",
 		"[1]vac [2]solid [3]water [4]air [5]lemon-juice [6]honey [0]pressure",
-		"[Q]lemon-chunk [W]ice-cube [9]draw-solid  |  [C]drag mode (wheel=rotate)",
+		"[Q]lemon-chunk [W]ice-cube [E]bubbles [9]draw-solid  |  [C]drag mode (wheel=rotate)",
 		"[space]pause  [P]clear vel  [V]clear pressure  |  wheel=radius",
 	]
 	_hud.text = "\n".join(lines)
@@ -868,6 +965,7 @@ func _tool_name() -> String:
 		Tool.LEMON_CHUNK: return "Lemon chunk 柠檬块"
 		Tool.ICE_CHUNK:   return "Ice cube 冰块"
 		Tool.DRAW_SOLID:  return "Movable solid 可移动固体"
+		Tool.BUBBLE:      return "Bubbles 气泡"
 		_: return "Pressure 压力" if _pressure_mode else MAT_NAMES[_brush_material]
 
 

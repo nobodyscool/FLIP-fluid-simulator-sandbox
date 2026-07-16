@@ -11,6 +11,11 @@ water_opacity = 0.8
 gas_edge_white = 0.4
 liquid_edge_white = 0.2
 foam_edge_base = 0.5
+bubble_color = Color(0.8509804, 0.9490196, 1, 0.38431373)
+bubble_rise = 14.0
+bubble_spawn_rate = 2.0
+bubble_src_max = 2.0
+bubble_max = 2000
 
 [node name="HUD" type="CanvasLayer" parent="." unique_id=1659695597]
 
